@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json
 import sys
 import os
@@ -30,13 +31,16 @@ def main():
                 data = json.loads(line)
                 func_name = data.get("func_name")
                 prompt = data.get("prompt", "")
-                
+                timestamp = data.get("timestamp", "")
+
                 display_name = func_name if func_name else "Global / Full File Context"
-                
-                f_out.write(f"## {i}. Target: `{display_name}`\n\n")
+
+                count += 1
+                f_out.write(f"## {count}. Target: `{display_name}`\n\n")
+                if timestamp:
+                    f_out.write(f"**Timestamp:** {timestamp}\n\n")
                 f_out.write(f"{prompt.strip()}\n\n")
                 f_out.write("---\n\n")
-                count += 1
             except json.JSONDecodeError:
                 print(f"Warning: Could not parse JSON on line {i}")
 

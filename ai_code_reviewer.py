@@ -21,6 +21,7 @@ MODEL_NAME    = "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m"
 # MODEL_NAME  = "llama3.2:3b"   # alternative model
 API_TIMEOUT   = 300             # seconds per Ollama request
 LOG_FILE_PATH = "ai_request_log.jsonl"
+INCLUDE_DIRS  = []              # additional header/source search paths (like -I flags)
 
 # -- Task --
 ROLE = "You are an expert C/C++ security researcher and code reviewer using english"
@@ -44,16 +45,38 @@ vulnerabilities in them.
 
 # -- Output format --
 OUTPUT_FORMAT_FUNCTION = """\
-First, provide a 1-2 sentence summary of what `{func_name}` does.
-Then, for each vulnerability found IN THE TARGET FUNCTION:
-- Line number (approximate)
-- Vulnerability description"""
+Respond with a JSON object only — no prose, no markdown fences. Schema:
+{{
+  "vulnerabilities": [
+    {{
+      "line": <approximate line number as integer>,
+      "description": "<vulnerability description>"
+    }},
+    {{
+      "line": <approximate line number as integer>,
+      "description": "<vulnerability description>"
+    }}
+  ]
+}}
+List ALL vulnerabilities found — one object per issue. If no vulnerabilities are found, return an empty "vulnerabilities" array."""
 
 OUTPUT_FORMAT_FULL_FILE = """\
-For each vulnerability found:
-- Line number (approximate)
-- Vulnerability description"""
+Respond with a JSON object only — no prose, no markdown fences. Schema:
+{
+  "vulnerabilities": [
+    {
+      "line": <approximate line number as integer>,
+      "description": "<vulnerability description>"
+    },
+    {
+      "line": <approximate line number as integer>,
+      "description": "<vulnerability description>"
+    }
+  ]
+}
+List ALL vulnerabilities found — one object per issue. If no vulnerabilities are found, return an empty "vulnerabilities" array."""
 
+import json
 import re
 
 # --- AST Parsing Classes ---
@@ -122,6 +145,63 @@ def extract_function_source(code_lines, start_line, filename="<unknown>", line_o
          
     return '\n'.join(source_lines)
 
+def _build_file_map(code_content):
+    """
+    Scan the merged code_content for '// --- FILE: name LINE: N ---' markers
+    inserted by read_code_file().
+    Returns a sorted list of (merged_line_1indexed, filename, orig_line_in_file).
+    """
+    file_map = []
+    marker_re = re.compile(r'^// --- FILE: (.+) LINE: (\d+) ---$')
+    for i, line in enumerate(code_content.split('\n'), start=1):
+        m = marker_re.match(line)
+        if m:
+            file_map.append((i, m.group(1), int(m.group(2))))
+    return file_map
+
+
+def _file_for_line(file_map, merged_line, fallback):
+    """
+    Return (filename, line_offset) for a given 1-indexed merged line number.
+    line_offset is chosen so that extract_function_source() displays per-file
+    line numbers, correctly accounting for spliced include blocks.
+
+    extract_function_source displays: i + 1 + line_offset  (i = merged_line - 1)
+    = merged_line + line_offset
+    We want displayed = orig_line + (merged_line - marker_merged_line) - 1
+    → line_offset = orig_line - marker_merged_line - 1
+    """
+    filename = fallback
+    line_offset = 0
+    for mline, fname, orig_line in file_map:
+        if mline <= merged_line:
+            filename = fname
+            line_offset = orig_line - mline - 1
+        else:
+            break
+    return filename, line_offset
+
+
+def _extract_file_sections(code_content, file_map):
+    """
+    Extract the content belonging to each file from the merged code_content.
+    Returns {filename: content_string}, concatenating multiple sections for
+    files (like the outer file) that are split by included content.
+    """
+    lines = code_content.split('\n')
+    sections = {}
+    for i, (mline, fname, _orig_line) in enumerate(file_map):
+        # marker is at lines[mline-1]; content starts at lines[mline]
+        content_start = mline
+        content_end = file_map[i + 1][0] - 1 if i + 1 < len(file_map) else len(lines)
+        chunk = '\n'.join(lines[content_start:content_end])
+        if fname in sections:
+            sections[fname] += '\n' + chunk
+        else:
+            sections[fname] = chunk
+    return sections
+
+
 def _find_functions_regex(stripped_code):
     """
     Fallback function finder using brace-depth tracking + signature heuristics.
@@ -188,6 +268,9 @@ def analyze_ast(code_content,filepath="<unknown>"):
         print("[WARNING] pycparser not found. Skipping AST analysis.")
         return {}
 
+    # Build file map before pruning (markers are // comments, lost after prune_context)
+    file_map = _build_file_map(code_content)
+
     # Strip directives and comments for AST parsing
     code_no_comments = prune_context(code_content)
     
@@ -232,24 +315,19 @@ typedef int int64_t;
     # Extract source code for each function using the original code_no_comments lines
     original_lines = code_no_comments.split('\n')
 
-    # Find the original filename from the first line if it exists
-    original_filename = filepath
-    for line in original_lines:
-        if line.startswith("// --- FILE:"):
-            original_filename = line.replace("// --- FILE:", "").replace("---", "").strip()
-            break
-
     result = {}
     for func_name, data in funcs_data.items():
         original_start_line = data['start_line'] - typedefs_lines
         if original_start_line < 1:
             original_start_line = 1
+        filename, line_offset = _file_for_line(file_map, original_start_line, filepath)
         source_text = extract_function_source(
             original_lines, original_start_line,
-            filename=original_filename, line_offset=-1)
+            filename=filename, line_offset=line_offset)
         result[func_name] = {
             'source': source_text,
-            'calls': data['calls']
+            'calls': data['calls'],
+            'file': filename,
         }
 
     return result
@@ -265,48 +343,63 @@ def prune_context(code_content):
     code_content = re.sub(r'/\\*.*?\\*/', '', code_content, flags=re.DOTALL)
     return code_content
 
-def read_code_file(filepath, processed_files=None):
+def _resolve_include(include_file, base_dir, include_dirs):
+    """Return the first existing path for include_file, searching base_dir then include_dirs."""
+    for directory in [base_dir] + list(include_dirs):
+        candidate = os.path.join(directory, include_file)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def read_code_file(filepath, processed_files=None, include_dirs=()):
     """
     Reads C source file and recursively merges local #include "..." files.
-    Values found in <> are ignored (system headers).
+    Searches base_dir of the current file first, then include_dirs in order.
+    Angle-bracket includes (<...>) are ignored (system headers).
     """
     if processed_files is None:
         processed_files = set()
-    
+
     abs_path = os.path.abspath(filepath)
     if abs_path in processed_files:
-        return "" # Avoid infinite recursion
-    
+        return ""
+
     processed_files.add(abs_path)
-    
+
     try:
         if not os.path.exists(abs_path):
-            # Try finding it in the same directory as the script if not absolute
-            return f"// [MISSING FILE] {filepath}\\n"
+            return f"// [MISSING FILE] {filepath}\n"
 
         with open(abs_path, 'r') as f:
             content = f.read()
-            
+
         base_dir = os.path.dirname(abs_path)
-        merged_content = f"// --- FILE: {os.path.basename(filepath)} ---\n"
-        
-        lines = content.split('\n')
-        for line in lines:
-            # Check for #include "filename"
+        basename = os.path.basename(filepath)
+        orig_line = 1  # tracks current line number within this file
+        merged_content = f"// --- FILE: {basename} LINE: 1 ---\n"
+
+        for line in content.split('\n'):
             match = re.match(r'^\s*#include\s+"([^"]+)"', line)
             if match:
+                orig_line += 1  # the #include line itself is not emitted
                 include_file = match.group(1)
-                include_path = os.path.join(base_dir, include_file)
-                merged_content += read_code_file(include_path, processed_files)
-                
-                # Also try to include the .c implementation if it exists
-                c_file = include_file.replace('.h', '.c')
-                c_path = os.path.join(base_dir, c_file)
-                if os.path.exists(c_path) and c_file != os.path.basename(filepath):
-                     merged_content += read_code_file(c_path, processed_files)
+                include_path = _resolve_include(include_file, base_dir, include_dirs)
+                if include_path:
+                    merged_content += read_code_file(include_path, processed_files, include_dirs)
+                    # Also pull in the companion .c file if it exists
+                    c_file = include_file.replace('.h', '.c')
+                    c_path = _resolve_include(c_file, base_dir, include_dirs)
+                    if c_path and c_file != os.path.basename(filepath):
+                        merged_content += read_code_file(c_path, processed_files, include_dirs)
+                    # Resume marker: tells the parser we're back in this file at orig_line
+                    merged_content += f"// --- FILE: {basename} LINE: {orig_line} ---\n"
+                else:
+                    merged_content += f"// [MISSING FILE] {include_file}\n"
             else:
                 merged_content += line + "\n"
-                
+                orig_line += 1
+
         return merged_content
 
     except Exception as e:
@@ -346,7 +439,7 @@ def _build_prompt(code_content, func_name=None, context_code=""):
 
 def review_code(code_content, func_name=None, context_code=""):
     """Sends the code to the LLM for security review using Ollama."""
-    import requests, json, datetime
+    import requests, datetime
 
     prompt_text = _build_prompt(code_content, func_name=func_name, context_code=context_code)
 
@@ -370,59 +463,91 @@ def review_code(code_content, func_name=None, context_code=""):
     except Exception as e:
         return f"Error communicating with AI service: {e}"
 
+def _parse_llm_json(text):
+    """Parse LLM response as JSON. Strips markdown code fences if present."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r'^```(?:json)?\s*', '', text)
+        text = re.sub(r'\s*```$', '', text.strip())
+        text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw": text}
+
+
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python ai_code_reviewer.py <path_to_c_file>")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(description="AI C/C++ security reviewer")
+    parser.add_argument("filepath", help="C source file to analyze")
+    parser.add_argument("-I", "--include-dir", action="append", dest="include_dirs",
+                        default=[], metavar="DIR",
+                        help="Additional include search path (repeatable, like gcc -I)")
+    parser.add_argument("-o", "--output", dest="output", default=None, metavar="FILE",
+                        help="Output JSON file (default: <source>.audit.json)")
+    args = parser.parse_args()
 
-    REPORT_SEP   = "=" * 30
-    REPORT_TITLE = " SECURITY REVIEW REPORT "
+    filepath = args.filepath
+    output_path = args.output or (os.path.splitext(filepath)[0] + ".audit.json")
+    include_dirs = INCLUDE_DIRS + [os.path.abspath(d) for d in args.include_dirs]
 
-    filepath = sys.argv[1]
-    print(f"Analyzing {filepath}...")
-    
-    code_content = read_code_file(filepath)
+    if include_dirs:
+        print(f"Include search paths: {include_dirs}", file=sys.stderr)
+    print(f"Analyzing {filepath}...", file=sys.stderr)
+
+    code_content = read_code_file(filepath, include_dirs=include_dirs)
+    report = {"file": filepath, "model": MODEL_NAME}
+
     if HAS_PYCPARSER:
-        print("Extracting AST and function dependencies...")
+        print("Extracting AST and function dependencies...", file=sys.stderr)
         functions = analyze_ast(code_content, filepath)
-    
-        if not functions:
-            print("Failed to build AST. Falling back to full file review...")
-            pruned_content = prune_context(code_content)
-            review_report = review_code(pruned_content)
-            print("\\n" + REPORT_SEP)
-            print(REPORT_TITLE)
-            print(REPORT_SEP + "\\n")
-            print(review_report)
-        else:
-            total = len(functions)
-            print(f"Found {total} functions. Auditing function-by-function...")
 
-            for idx, (func_name, data) in enumerate(functions.items(), start=1):
+        if not functions:
+            print("Failed to build AST. Falling back to full file review...", file=sys.stderr)
+            pruned_content = prune_context(code_content)
+            report["mode"] = "full-file"
+            report.update(_parse_llm_json(review_code(pruned_content)))
+        else:
+            target_basename = os.path.basename(filepath)
+            target_funcs = {n: d for n, d in functions.items()
+                            if d['file'] == target_basename}
+            total = len(target_funcs)
+            print(f"Found {len(functions)} functions ({total} in target file). "
+                  f"Auditing function-by-function...", file=sys.stderr)
+            report["mode"] = "function-by-function"
+            report["functions"] = []
+
+            # Build header context once — shared across all function reviews
+            file_map = _build_file_map(code_content)
+            file_sections = _extract_file_sections(code_content, file_map)
+            header_context = ""
+            for fname, content in file_sections.items():
+                if fname.endswith('.h') and fname != target_basename:
+                    header_context += f"// --- Header: {fname} ---\n{content}\n"
+
+            for idx, (func_name, data) in enumerate(target_funcs.items(), start=1):
                 pct = int(idx / total * 100)
-                print(f"\n{'='*40}")
-                print(f" [{idx}/{total}] ({pct}%) Auditing function: {func_name} ")
-                print(f"{'='*40}")
-                
-                # Build context block (supporting functions only)
-                context_code = ""
+                print(f"[{idx}/{total}] ({pct}%) Auditing: {func_name}", file=sys.stderr)
+
+                context_code = header_context
                 dependencies = [c for c in data['calls'] if c in functions and c != func_name]
                 if dependencies:
                     for dep in dependencies:
                         context_code += f"// --- Context Function: {dep} ---\n"
                         context_code += functions[dep]['source'] + "\n"
 
-                review_report = review_code(data['source'], func_name=func_name, context_code=context_code)
-                print(review_report)
-                
+                raw = review_code(data['source'], func_name=func_name, context_code=context_code)
+                entry = {"function": func_name, **_parse_llm_json(raw)}
+                report["functions"].append(entry)
     else:
-        print("Pruning code context...")
+        print("Pruning code context...", file=sys.stderr)
         pruned_content = prune_context(code_content)
-        review_report = review_code(pruned_content)
-        print("\n" + REPORT_SEP)
-        print(REPORT_TITLE)
-        print(REPORT_SEP + "\n")
-        print(review_report)
+        report["mode"] = "full-file"
+        report.update(_parse_llm_json(review_code(pruned_content)))
+
+    with open(output_path, 'w') as f:
+        json.dump(report, f, indent=2)
+    print(f"Audit report written to {output_path}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

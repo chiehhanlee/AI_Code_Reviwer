@@ -1,21 +1,210 @@
+#!/usr/bin/env python3
 import sys
 # WORKAROUND: The environment has a broken OpenSSL/cryptography setup that crashes on import.
 # We block 'OpenSSL' so that requests/urllib3 fall back to the standard 'ssl' library.
 sys.modules["OpenSSL"] = None
 
 import os
-try:
-    import google.generativeai as genai
-    HAS_GENAI = True
-except ImportError:
-    HAS_GENAI = False
+# Ollama configuration
+OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+if not OLLAMA_HOST:
+    print("[ERROR] OLLAMA_HOST environment variable is not set.")
+    sys.exit(1)
+OLLAMA_URL = OLLAMA_HOST if OLLAMA_HOST.startswith("http") else f"http://{OLLAMA_HOST}"
 
+# ---------------------------------------------------------------------------
+# --- Configuration ----------------------------------------------------------
+# ---------------------------------------------------------------------------
 
-# Configure the API key
-API_KEY = os.getenv("GEMINI_API_KEY")
+# -- Model --
+MODEL_NAME    = "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m"
+# MODEL_NAME  = "llama3.2:3b"   # alternative model
+API_TIMEOUT   = 300             # seconds per Ollama request
+LOG_FILE_PATH = "ai_request_log.jsonl"
+
+# -- Task --
+ROLE = "You are an expert C/C++ security researcher and code reviewer."
+
+FOCUS_AREAS = """\
+1. Buffer overflows
+2. Format string vulnerabilities
+3. Integer overflows/underflows
+4. Memory leaks and management issues
+5. Input validation failures"""
+
+CONTEXT_SECTION_TEMPLATE = """\
+## Supporting Context
+The following functions are called by or call `{func_name}`. They are provided \
+ONLY to help you understand data flow and interactions. Do NOT report \
+vulnerabilities in them.
+```c
+{context_code}
+```
+"""
+
+# -- Output format --
+OUTPUT_FORMAT_FUNCTION = """\
+First, provide a 1-2 sentence summary of what `{func_name}` does.
+Then, for each vulnerability found IN THE TARGET FUNCTION:
+- Line number (approximate)
+- Vulnerability description
+- Potential impact
+- Suggested fix"""
+
+OUTPUT_FORMAT_FULL_FILE = """\
+For each vulnerability found:
+- Line number (approximate)
+- Vulnerability description
+- Potential impact
+- Suggested fix"""
 
 import re
 
+# --- AST Parsing Classes ---
+try:
+    from pycparser import c_parser, c_ast
+    HAS_PYCPARSER = True
+except ImportError:
+    HAS_PYCPARSER = False
+
+class FuncCallVisitor(c_ast.NodeVisitor):
+    def __init__(self):
+        self.calls = set()
+
+    def visit_FuncCall(self, node):
+        if getattr(node.name, 'name', None):
+            self.calls.add(node.name.name)
+        self.generic_visit(node)
+
+class FuncDefVisitor(c_ast.NodeVisitor):
+    def __init__(self):
+        self.functions = {}
+
+    def visit_FuncDef(self, node):
+        func_name = node.decl.name
+        start_line = node.coord.line
+        
+        call_visitor = FuncCallVisitor()
+        call_visitor.visit(node.body)
+        
+        self.functions[func_name] = {
+            'start_line': start_line,
+            'calls': list(call_visitor.calls),
+        }
+        self.generic_visit(node)
+
+def extract_function_source(code_lines, start_line, filename="<unknown>", line_offset=0):
+    start_idx = start_line - 1
+    brace_count = 0
+    found_brace = False
+    end_idx = start_idx
+    
+    # Simple brace matching to extract function body
+    for i in range(start_idx, len(code_lines)):
+        line = code_lines[i]
+        
+        # Don't match braces inside comments or strings (assuming pruned context mostly)
+        for char in line:
+            if char == '{':
+                found_brace = True
+                brace_count += 1
+            elif char == '}':
+                brace_count -= 1
+                
+        if found_brace and brace_count == 0:
+            end_idx = i
+            break
+            
+    if not found_brace:
+        return ""
+        
+    # Prepend line numbers and filename
+    source_lines = []
+    source_lines.append(f"// File: {filename}")
+    for i in range(start_idx, end_idx + 1):
+         source_lines.append(f"{i + 1 + line_offset:4d} | {code_lines[i]}")
+         
+    return '\n'.join(source_lines)
+
+def analyze_ast(code_content,filepath="<unknown>"):
+    if not HAS_PYCPARSER:
+        print("[WARNING] pycparser not found. Skipping AST analysis.")
+        return {}
+
+    # Strip directives and comments for AST parsing
+    code_no_comments = prune_context(code_content)
+    
+    lines = code_no_comments.split('\n')
+    out = []
+    for line in lines:
+        if line.strip().startswith('#'):
+            out.append('')
+        else:
+            out.append(line)
+            
+    ast_code = '\n'.join(out)
+    
+    # Inject standard types
+    typedefs = """
+typedef unsigned int size_t;
+typedef void FILE;
+typedef int ssize_t;
+typedef int uint32_t;
+typedef int int32_t;
+typedef int uint8_t;
+typedef int int8_t;
+typedef int uint16_t;
+typedef int int16_t;
+typedef int uint64_t;
+typedef int int64_t;
+"""
+    ast_code = typedefs + "\n" + ast_code
+    
+    parser = c_parser.CParser()
+    try:
+        # We need to subtract the number of lines added by typedefs 
+        # to get correct line numbers matching our original `code_no_comments`
+        # But wait, we added `typedefs` as a string. Let's count its newlines.
+        typedefs_lines = typedefs.count('\n') + 1  # actual \n in typedefs + the "\n" separator in `typedefs + "\n" + ast_code`
+        
+        ast = parser.parse(ast_code, filename='<code_content>')
+        
+        visitor = FuncDefVisitor()
+        visitor.visit(ast)
+
+
+
+        # Extract source code for each function using the original code_no_comments lines
+        original_lines = code_no_comments.split('\n')
+        
+        # Find the original filename from the first line if it exists
+        original_filename = filepath
+        for line in original_lines:
+            if line.startswith("// --- FILE:"):
+                 original_filename = line.replace("// --- FILE:", "").replace("---", "").strip()
+                 break
+
+        result = {}
+        for func_name, data in visitor.functions.items():
+            # Adjust start line back to original
+            original_start_line = data['start_line'] - typedefs_lines
+            if original_start_line < 1:
+                 original_start_line = 1
+            
+            source_text = extract_function_source(original_lines, original_start_line, filename=original_filename, line_offset=-1)
+            
+            result[func_name] = {
+                'source': source_text,
+                'calls': data['calls']
+            }
+            
+        return result
+        
+    except Exception as e:
+        print(f"[ERROR] AST Parsing failed: {e}")
+        return {}
+
+# --- Existing Functions ---
 def prune_context(code_content):
     """
     Minifies C code by removing comments and extra whitespace.
@@ -24,9 +213,7 @@ def prune_context(code_content):
     # Remove single-line comments // ...
     code_content = re.sub(r'//.*', '', code_content)
     # Remove multi-line comments /* ... */
-    code_content = re.sub(r'/\*.*?\*/', '', code_content, flags=re.DOTALL)
-    # Remove extra whitespace (multiple spaces/tabs to single space, multiple newlines to single)
-    code_content = re.sub(r'\s+', ' ', code_content).strip()
+    code_content = re.sub(r'/\\*.*?\\*/', '', code_content, flags=re.DOTALL)
     return code_content
 
 def read_code_file(filepath, processed_files=None):
@@ -46,7 +233,7 @@ def read_code_file(filepath, processed_files=None):
     try:
         if not os.path.exists(abs_path):
             # Try finding it in the same directory as the script if not absolute
-            return f"// [MISSING FILE] {filepath}\n"
+            return f"// [MISSING FILE] {filepath}\\n"
 
         with open(abs_path, 'r') as f:
             content = f.read()
@@ -76,112 +263,118 @@ def read_code_file(filepath, processed_files=None):
     except Exception as e:
         return f"// Error reading {filepath}: {e}\n"
 
-def review_code(code_content):
-    """Sends the code to the LLM for security review."""
-    if not API_KEY:
+def _build_prompt(code_content, func_name=None, context_code=""):
+    if func_name:
+        context_section = ""
+        if context_code:
+            context_section = CONTEXT_SECTION_TEMPLATE.format(
+                func_name=func_name, context_code=context_code)
+        output_format = OUTPUT_FORMAT_FUNCTION.format(func_name=func_name)
+        return (
+            f"{ROLE}\n\n"
+            f"## Task\n"
+            f"Analyze the target function `{func_name}` for security vulnerabilities. "
+            f"Focus exclusively on the target function — do not report issues in the "
+            f"supporting context functions.\n\n"
+            f"## Focus Areas\n{FOCUS_AREAS}\n\n"
+            f"## Output Format\n{output_format}\n"
+            f"{context_section}"
+            f"## Target Function: `{func_name}`\n"
+            f"Analyze this function for the vulnerabilities listed above.\n"
+            f"```c\n{code_content}\n```\n"
+        )
+    else:
+        return (
+            f"{ROLE}\n\n"
+            f"## Task\n"
+            f"Analyze the following C code for security vulnerabilities.\n\n"
+            f"## Focus Areas\n{FOCUS_AREAS}\n\n"
+            f"## Output Format\n{OUTPUT_FORMAT_FULL_FILE}\n\n"
+            f"## Code\n"
+            f"```c\n{code_content}\n```\n"
+        )
 
-        print("\n[WARNING] GEMINI_API_KEY environment variable not set.")
-        print("Skipping actual API call. Mocking response for demonstration.")
-        return mock_review_response(code_content)
 
-    # DIRECT REST API FALLBACK (Since installed library is too old)
-    import requests
-    import json
+def review_code(code_content, func_name=None, context_code=""):
+    """Sends the code to the LLM for security review using Ollama."""
+    import requests, json, datetime
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={API_KEY}"
-    
-    headers = {
-        'Content-Type': 'application/json'
-    }
-    
-    prompt_text = f"""
-You are an expert C/C++ security researcher and code reviewer.
-Your task is to analyze the following C code for security vulnerabilities.
-Focus on:
-1. Buffer overflows
-2. Format string vulnerabilities
-3. Integer overflows/underflows
-4. Memory leaks and management issues
-5. Input validation failures
+    prompt_text = _build_prompt(code_content, func_name=func_name, context_code=context_code)
 
-For each issue found:
-- specific the line number (approximate)
-- Describe the vulnerability
-- Explain the potential impact
-- Suggest a fix
+    log_entry = {"timestamp": datetime.datetime.now().isoformat(),
+                 "func_name": func_name, "prompt": prompt_text}
+    with open(LOG_FILE_PATH, "a") as log_file:
+        log_file.write(json.dumps(log_entry) + "\n")
 
-Here is the code:
-```c
-{code_content}
-```
-"""
-    
-    data = {
-        "contents": [{
-            "parts": [{
-                "text": prompt_text
-            }]
-        }]
-    }
-
+    url = f"{OLLAMA_URL}/api/generate"
     try:
-        response = requests.post(url, headers=headers, json=data)
-        
+        response = requests.post(url,
+                                 json={"model": MODEL_NAME, "prompt": prompt_text, "stream": False},
+                                 timeout=API_TIMEOUT)
         if response.status_code == 200:
-            result = response.json()
-            # Extract text from response
-            try:
-                candidates = result.get('candidates', [])
-                if candidates:
-                    return candidates[0]['content']['parts'][0]['text']
-                else:
-                    return "AI returned no candidates. Raw response: " + str(result)
-            except (KeyError, IndexError) as e:
-                 return f"Error parsing API response: {e}. Raw: {str(result)}"
-        else:
-            return f"API Error {response.status_code}: {response.text}"
-
+            return response.json().get("response", "No response text found.")
+        return f"API Error {response.status_code}: {response.text}"
+    except requests.exceptions.Timeout:
+        return f"Error: Request to Ollama timed out after {API_TIMEOUT} seconds."
+    except requests.exceptions.ConnectionError:
+        return f"Error: Could not connect to Ollama at {OLLAMA_URL}. Is Ollama running?"
     except Exception as e:
         return f"Error communicating with AI service: {e}"
-
-def mock_review_response(code_content):
-    """Provides a canned response for testing without an API key."""
-    return """
-[MOCK AI REVIEW REPORT]
-
-1. **Buffer Overflow**
-   - **Location**: `strcpy(buffer, input);`
-   - **Issue**: Source string structure is blindly copied to a fixed-size buffer.
-   - **Impact**: Code execution or crash.
-   - **Fix**: Use `strncpy` or explicitly check length.
-
-2. **Format String Vulnerability**
-   - **Location**: `printf(buffer);`
-   - **Issue**: Passing user-controlled input directly as the format string.
-   - **Impact**: Information leak or crash.
-   - **Fix**: Use `printf("%s", buffer);`.
-"""
 
 def main():
     if len(sys.argv) < 2:
         print("Usage: python ai_code_reviewer.py <path_to_c_file>")
         sys.exit(1)
 
+    REPORT_SEP   = "=" * 30
+    REPORT_TITLE = " SECURITY REVIEW REPORT "
+
     filepath = sys.argv[1]
     print(f"Analyzing {filepath}...")
     
     code_content = read_code_file(filepath)
+    functions = None
+    if HAS_PYCPARSER:
+        print("Extracting AST and function dependencies...")
+        functions = analyze_ast(code_content, filepath)
     
-    # Prune context to optimize token usage
-    print("Pruning code context...")
-    pruned_content = prune_context(code_content)
-    
-    review_report = review_code(pruned_content)
-    
-    print("\n" + "="*30)
-    print(" SECURITY REVIEW REPORT ")
-    print("="*30 + "\n")
-    print(review_report)
+        if not functions:
+            print("Failed to build AST. Falling back to full file review...")
+            pruned_content = prune_context(code_content)
+            review_report = review_code(pruned_content)
+            print("\\n" + REPORT_SEP)
+            print(REPORT_TITLE)
+            print(REPORT_SEP + "\\n")
+            print(review_report)
+        else:
+            total = len(functions)
+            print(f"Found {total} functions. Auditing function-by-function...")
+
+            for idx, (func_name, data) in enumerate(functions.items(), start=1):
+                pct = int(idx / total * 100)
+                print(f"\n{'='*40}")
+                print(f" [{idx}/{total}] ({pct}%) Auditing function: {func_name} ")
+                print(f"{'='*40}")
+                
+                # Build context block (supporting functions only)
+                context_code = ""
+                dependencies = [c for c in data['calls'] if c in functions and c != func_name]
+                if dependencies:
+                    for dep in dependencies:
+                        context_code += f"// --- Context Function: {dep} ---\n"
+                        context_code += functions[dep]['source'] + "\n"
+
+                review_report = review_code(data['source'], func_name=func_name, context_code=context_code)
+                print(review_report)
+                
+    else:
+        print("Pruning code context...")
+        pruned_content = prune_context(code_content)
+        review_report = review_code(pruned_content)
+        print("\n" + REPORT_SEP)
+        print(REPORT_TITLE)
+        print(REPORT_SEP + "\n")
+        print(review_report)
 
 if __name__ == "__main__":
     main()

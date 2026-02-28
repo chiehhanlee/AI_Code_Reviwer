@@ -23,7 +23,7 @@ API_TIMEOUT   = 300             # seconds per Ollama request
 LOG_FILE_PATH = "ai_request_log.jsonl"
 
 # -- Task --
-ROLE = "You are an expert C/C++ security researcher and code reviewer."
+ROLE = "You are an expert C/C++ security researcher and code reviewer using english"
 
 FOCUS_AREAS = """\
 1. Buffer overflows
@@ -47,16 +47,12 @@ OUTPUT_FORMAT_FUNCTION = """\
 First, provide a 1-2 sentence summary of what `{func_name}` does.
 Then, for each vulnerability found IN THE TARGET FUNCTION:
 - Line number (approximate)
-- Vulnerability description
-- Potential impact
-- Suggested fix"""
+- Vulnerability description"""
 
 OUTPUT_FORMAT_FULL_FILE = """\
 For each vulnerability found:
 - Line number (approximate)
-- Vulnerability description
-- Potential impact
-- Suggested fix"""
+- Vulnerability description"""
 
 import re
 
@@ -126,6 +122,67 @@ def extract_function_source(code_lines, start_line, filename="<unknown>", line_o
          
     return '\n'.join(source_lines)
 
+def _find_functions_regex(stripped_code):
+    """
+    Fallback function finder using brace-depth tracking + signature heuristics.
+    Used when pycparser fails on macro-heavy C (e.g. TAILQ_ENTRY, TOKEN_COUNT).
+    Returns {func_name: {'start_line': int, 'calls': list}} — same shape as
+    FuncDefVisitor.functions so the rest of analyze_ast() is unchanged.
+    """
+    C_KEYWORDS = {
+        'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
+        'return', 'break', 'continue', 'goto', 'typedef', 'struct', 'union',
+        'enum', 'sizeof', '__typeof__', '__attribute__', 'asm', '__asm__',
+        '__asm', 'volatile', '__volatile__',
+    }
+    ident_call_re = re.compile(r'\b([a-zA-Z_]\w*)\s*\(')
+
+    lines = stripped_code.split('\n')
+    result = {}
+    brace_depth = 0
+    pending_name = None
+    pending_start = None
+    sig_buf = []
+
+    for lineno, line in enumerate(lines, start=1):
+        opens = line.count('{')
+        closes = line.count('}')
+
+        if brace_depth == 0:
+            if opens > 0:
+                sig = ' '.join(sig_buf + [line[:line.index('{')]])
+                if ')' in sig and '=' not in sig:
+                    candidates = [m for m in ident_call_re.findall(sig)
+                                  if m not in C_KEYWORDS]
+                    if candidates:
+                        pending_name = candidates[-1]
+                        pending_start = lineno
+                sig_buf = []
+                brace_depth += opens - closes
+            else:
+                stripped = line.strip()
+                if ';' in stripped:
+                    sig_buf = []
+                elif stripped and not stripped.startswith('*'):
+                    sig_buf.append(stripped)
+        else:
+            brace_depth += opens - closes
+            if brace_depth == 0 and pending_name:
+                body = '\n'.join(lines[pending_start - 1:lineno])
+                calls = list(
+                    set(ident_call_re.findall(body))
+                    - C_KEYWORDS - {pending_name}
+                )
+                result[pending_name] = {
+                    'start_line': pending_start,
+                    'calls': calls,
+                }
+                pending_name = None
+                pending_start = None
+
+    return result
+
+
 def analyze_ast(code_content,filepath="<unknown>"):
     if not HAS_PYCPARSER:
         print("[WARNING] pycparser not found. Skipping AST analysis.")
@@ -142,8 +199,8 @@ def analyze_ast(code_content,filepath="<unknown>"):
         else:
             out.append(line)
             
-    ast_code = '\n'.join(out)
-    
+    ast_code_stripped = '\n'.join(out)
+
     # Inject standard types
     typedefs = """
 typedef unsigned int size_t;
@@ -158,53 +215,45 @@ typedef int int16_t;
 typedef int uint64_t;
 typedef int int64_t;
 """
-    ast_code = typedefs + "\n" + ast_code
-    
+    ast_code = typedefs + "\n" + ast_code_stripped
+    typedefs_lines = typedefs.count('\n') + 1  # lines added before the real code
+
     parser = c_parser.CParser()
     try:
-        # We need to subtract the number of lines added by typedefs 
-        # to get correct line numbers matching our original `code_no_comments`
-        # But wait, we added `typedefs` as a string. Let's count its newlines.
-        typedefs_lines = typedefs.count('\n') + 1  # actual \n in typedefs + the "\n" separator in `typedefs + "\n" + ast_code`
-        
         ast = parser.parse(ast_code, filename='<code_content>')
-        
         visitor = FuncDefVisitor()
         visitor.visit(ast)
-
-
-
-        # Extract source code for each function using the original code_no_comments lines
-        original_lines = code_no_comments.split('\n')
-        
-        # Find the original filename from the first line if it exists
-        original_filename = filepath
-        for line in original_lines:
-            if line.startswith("// --- FILE:"):
-                 original_filename = line.replace("// --- FILE:", "").replace("---", "").strip()
-                 break
-
-        result = {}
-        for func_name, data in visitor.functions.items():
-            # Adjust start line back to original
-            original_start_line = data['start_line'] - typedefs_lines
-            if original_start_line < 1:
-                 original_start_line = 1
-            
-            source_text = extract_function_source(original_lines, original_start_line, filename=original_filename, line_offset=-1)
-            
-            result[func_name] = {
-                'source': source_text,
-                'calls': data['calls']
-            }
-            
-        return result
-        
+        funcs_data = visitor.functions
     except Exception as e:
-        print(f"[ERROR] AST Parsing failed: {e}")
-        return {}
+        print(f"[WARNING] pycparser failed ({e}), retrying with regex extraction.")
+        funcs_data = _find_functions_regex(ast_code_stripped)
+        typedefs_lines = 0  # regex line numbers already match code_no_comments
 
-# --- Existing Functions ---
+    # Extract source code for each function using the original code_no_comments lines
+    original_lines = code_no_comments.split('\n')
+
+    # Find the original filename from the first line if it exists
+    original_filename = filepath
+    for line in original_lines:
+        if line.startswith("// --- FILE:"):
+            original_filename = line.replace("// --- FILE:", "").replace("---", "").strip()
+            break
+
+    result = {}
+    for func_name, data in funcs_data.items():
+        original_start_line = data['start_line'] - typedefs_lines
+        if original_start_line < 1:
+            original_start_line = 1
+        source_text = extract_function_source(
+            original_lines, original_start_line,
+            filename=original_filename, line_offset=-1)
+        result[func_name] = {
+            'source': source_text,
+            'calls': data['calls']
+        }
+
+    return result
+
 def prune_context(code_content):
     """
     Minifies C code by removing comments and extra whitespace.
@@ -333,7 +382,6 @@ def main():
     print(f"Analyzing {filepath}...")
     
     code_content = read_code_file(filepath)
-    functions = None
     if HAS_PYCPARSER:
         print("Extracting AST and function dependencies...")
         functions = analyze_ast(code_content, filepath)

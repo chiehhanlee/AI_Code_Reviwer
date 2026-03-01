@@ -30,7 +30,9 @@ def main():
             try:
                 data = json.loads(line)
                 func_name = data.get("func_name")
-                prompt = data.get("prompt", "")
+                system_prompt = data.get("system", "")
+                user_prompt = data.get("user", "")
+                prompt = data.get("prompt", "")   # legacy fallback
                 timestamp = data.get("timestamp", "")
 
                 display_name = func_name if func_name else "Global / Full File Context"
@@ -39,7 +41,15 @@ def main():
                 f_out.write(f"## {count}. Target: `{display_name}`\n\n")
                 if timestamp:
                     f_out.write(f"**Timestamp:** {timestamp}\n\n")
-                f_out.write(f"{prompt.strip()}\n\n")
+
+                if system_prompt or user_prompt:
+                    if system_prompt:
+                        f_out.write(f"### System\n\n{system_prompt.strip()}\n\n")
+                    if user_prompt:
+                        f_out.write(f"### User\n\n{user_prompt.strip()}\n\n")
+                else:
+                    f_out.write(f"{prompt.strip()}\n\n")
+
                 f_out.write("---\n\n")
             except json.JSONDecodeError:
                 print(f"Warning: Could not parse JSON on line {i}")

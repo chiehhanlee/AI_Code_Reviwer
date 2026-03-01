@@ -90,6 +90,78 @@ class TestLLMClient(unittest.TestCase):
         result = llm_client.review_code("system prompt", "user prompt")
         self.assertIn("Could not connect", result)
 
+    @patch('llm_client.ACTIVE_BACKEND', 'gemini')
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_gemini_success(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "gemini found issue"}]}}]
+        }
+        mock_post.return_value = mock_response
+
+        result = llm_client.review_code("system prompt", "user prompt")
+        self.assertEqual(result, "gemini found issue")
+
+    @patch('llm_client.ACTIVE_BACKEND', 'gemini')
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_gemini_api_error(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        mock_response.text = "Too Many Requests"
+        mock_post.return_value = mock_response
+
+        result = llm_client.review_code("system prompt", "user prompt")
+        self.assertIn("API Error 429", result)
+
+    @patch('llm_client.ACTIVE_BACKEND', 'gemini')
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post', side_effect=requests.exceptions.Timeout)
+    def test_review_code_gemini_timeout(self, mock_post):
+        result = llm_client.review_code("system prompt", "user prompt")
+        self.assertIn("timed out", result)
+
+    @patch('llm_client.ACTIVE_BACKEND', 'gemini')
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post', side_effect=requests.exceptions.ConnectionError)
+    def test_review_code_gemini_connection_error(self, mock_post):
+        result = llm_client.review_code("system prompt", "user prompt")
+        self.assertIn("Could not connect", result)
+
+    @patch('llm_client.ACTIVE_BACKEND', 'gemini')
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_gemini_malformed_response(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {}
+        mock_post.return_value = mock_response
+
+        result = llm_client.review_code("system prompt", "user prompt")
+        self.assertEqual(result, "No response text found.")
+
+    @patch('llm_client.ACTIVE_BACKEND', 'gemini')
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_gemini_request_body(self, mock_post):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "candidates": [{"content": {"parts": [{"text": "ok"}]}}]
+        }
+        mock_post.return_value = mock_response
+
+        llm_client.review_code("my system", "my user")
+
+        _, kwargs = mock_post.call_args
+        body = kwargs["json"]
+        self.assertIn("system_instruction", body)
+        self.assertIn("contents", body)
+        self.assertEqual(body["system_instruction"]["parts"][0]["text"], "my system")
+        self.assertEqual(body["contents"][0]["parts"][0]["text"], "my user")
+
     def test_parse_llm_json_clean(self):
         result = llm_client._parse_llm_json('{"vulnerabilities": []}')
         self.assertEqual(result, {"vulnerabilities": []})

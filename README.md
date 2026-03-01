@@ -1,6 +1,6 @@
 # AI C/C++ Security Code Reviewer
 
-An AI-powered security vulnerability scanner for C/C++ source files. It uses a local [Ollama](https://ollama.ai) LLM to analyze code function-by-function via AST parsing and report security issues with approximate line numbers.
+An AI-powered security vulnerability scanner for C/C++ source files. It analyzes code function-by-function via AST parsing and reports security issues with approximate line numbers. Supports two LLM backends: a local [Ollama](https://ollama.ai) instance or the Google Gemini API.
 
 ## Features
 
@@ -10,7 +10,8 @@ An AI-powered security vulnerability scanner for C/C++ source files. It uses a l
 - **Regex fallback** — falls back to brace-depth heuristics when `pycparser` cannot parse macro-heavy code
 - **Full-file fallback** — if AST extraction fails entirely, sends the minified whole file as a single request
 - **JSON audit reports** — results are written to `<source>.audit.json`
-- **Request logging** — every prompt sent to Ollama is appended to `ai_request_log.jsonl`
+- **Dual LLM backends** — switch between a local Ollama model and Google Gemini Flash via an environment variable
+- **Request logging** — every prompt sent to the LLM is appended to `ai_request_log.jsonl`
 
 ## Detected Vulnerability Classes
 
@@ -31,9 +32,9 @@ An AI-powered security vulnerability scanner for C/C++ source files. It uses a l
 ## Requirements
 
 - Python 3.8+
-- [Ollama](https://ollama.ai) running locally (or remotely)
 - `requests` library
 - `pycparser` (optional — enables AST mode, strongly recommended)
+- [Ollama](https://ollama.ai) running locally or remotely **or** a Google Gemini API key
 
 Install Python dependencies into the provided virtual environment:
 
@@ -44,23 +45,37 @@ pip install requests pycparser
 
 ## Setup
 
-Set the `OLLAMA_HOST` environment variable before running anything:
+Select a backend with `LLM_BACKEND` (default: `ollama`).
+
+### Ollama backend (default)
 
 ```bash
+export LLM_BACKEND=ollama          # optional — ollama is the default
 export OLLAMA_HOST="http://localhost:11434"
 ```
 
-The active model is configured in `llm_client.py`:
-
-```python
-MODEL_NAME = "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m"
-```
-
-Pull the model with Ollama if you haven't already:
+Pull the model if you haven't already:
 
 ```bash
 ollama pull dagbs/deepseek-coder-v2-lite-instruct:q3_k_m
 ```
+
+### Gemini backend
+
+```bash
+export LLM_BACKEND=gemini
+export GEMINI_API_KEY=<your-api-key>
+```
+
+The Gemini model used is `gemini-2.0-flash`.
+
+### Environment variable summary
+
+| Variable | Required for | Default |
+|----------|-------------|---------|
+| `LLM_BACKEND` | all | `ollama` |
+| `OLLAMA_HOST` | `LLM_BACKEND=ollama` | _(none, exits if missing)_ |
+| `GEMINI_API_KEY` | `LLM_BACKEND=gemini` | _(none, exits if missing)_ |
 
 ## Usage
 
@@ -121,11 +136,10 @@ The audit report is written to `<source>.audit.json` by default.
 ```
 ai_code_reviewer.py   # CLI entry point and orchestration
 context_builder.py    # AST parsing, include merging, prompt construction
-llm_client.py         # Ollama HTTP client and response parsing
+llm_client.py         # LLM backends (Ollama + Gemini) and response parsing
 format_log.py         # Converts ai_request_log.jsonl to readable Markdown
 test_ai_reviewer.py   # Unit tests (context_builder + llm_client)
 test_ast_env.py       # Checks pycparser availability
-
 ```
 
 ## Running Tests

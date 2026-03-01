@@ -9,14 +9,20 @@ import re
 
 INCLUDE_DIRS = []  # additional header/source search paths (like -I flags)
 
-ROLE = "You are an expert C/C++ security researcher and code reviewer using english"
+ROLE = "You are an  C/C++ security code reviewe expert using english"
 
 FOCUS_AREAS = """\
-1. Buffer overflows
-2. Format string vulnerabilities
-3. Integer overflows/underflows
-4. Memory leaks and management issues
-5. Input validation failures"""
+1. CWE-121: Stack-based Buffer Overflow - Occurs when the buffer is on the stack, often leading to immediate control flow hijacking.\
+2. CWE-122: Heap-based Buffer Overflow - Occurs when the buffer is allocated on the heap, leading to more complex vulnerabilities.\
+3. CWE-134: Use of Externally-Controlled Format String. This weakness occurs when functions that interpret a format string, such as printf() in C/C++, use an untrusted or external input directly as the format\
+4. CWE-190: Integer Overflow (Wrap or Wraparound)\
+5. CWE-401: Missing Release of Memory after Effective Lifetime (Memory Leak): Memory is allocated but not freed, causing it to accumulate, which can crash programs in long-running applications.\
+6. CWE-415: Double Free: Memory is freed twice, which can corrupt memory management structures, leading to crashes or exploitable vulnerabilities.\
+7. CWE-416: Use After Free (UAF): A program continues to use a pointer after it has been freed, a common and severe vulnerability that can lead to arbitrary code execution.\
+8. CWE-119: Improper Restriction of Operations within the Bounds of a Memory Buffer: General class of buffer errors that can cause memory corruption.\
+9. CWE-125: Out-of-bounds Read: Accessing memory outside of the intended buffer can expose sensitive information. \
+10. CWE-20 Input validation failures\
+11. CWE-676: Use of Potentially Dangerous Function"""
 
 CONTEXT_SECTION_TEMPLATE = """\
 ## Supporting Context

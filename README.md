@@ -1,16 +1,16 @@
 # AI C/C++ Security Code Reviewer
 
-An AI-powered security vulnerability scanner for C/C++ source files. It analyzes code function-by-function via AST parsing and reports security issues with approximate line numbers. Supports two LLM backends: a local [Ollama](https://ollama.ai) instance or the Google Gemini API.
+An AI-powered security vulnerability scanner for C/C++ source files. It analyzes code function-by-function via AST parsing and reports security issues with approximate line numbers. Supports two LLM backends: a local [Ollama](https://ollama.ai) instance or Google Gemini Flash.
 
 ## Features
 
 - **Function-level analysis** — parses the AST to audit each function individually, reducing noise and token usage
-- **Context injection** — passes callers/callees alongside the target function so the model can reason across call boundaries
+- **Context injection** — passes callers/callees and header content alongside the target function so the model can reason across call boundaries
 - **Recursive include merging** — inlines local `#include "..."` headers and companion `.c` files before analysis
 - **Regex fallback** — falls back to brace-depth heuristics when `pycparser` cannot parse macro-heavy code
 - **Full-file fallback** — if AST extraction fails entirely, sends the minified whole file as a single request
-- **JSON audit reports** — results are written to `<source>.audit.json`
 - **Dual LLM backends** — switch between a local Ollama model and Google Gemini Flash via an environment variable
+- **JSON audit reports** — results written to `<source>.audit.json`
 - **Request logging** — every prompt sent to the LLM is appended to `ai_request_log.jsonl`
 
 ## Detected Vulnerability Classes
@@ -19,6 +19,7 @@ An AI-powered security vulnerability scanner for C/C++ source files. It analyzes
 |-----|-------------|
 | CWE-20  | Input Validation Failures |
 | CWE-119 | Improper Restriction of Buffer Operations |
+| CWE-120 | Buffer Copy without Checking Size of Input |
 | CWE-121 | Stack-based Buffer Overflow |
 | CWE-122 | Heap-based Buffer Overflow |
 | CWE-125 | Out-of-bounds Read |
@@ -27,7 +28,9 @@ An AI-powered security vulnerability scanner for C/C++ source files. It analyzes
 | CWE-401 | Memory Leak |
 | CWE-415 | Double Free |
 | CWE-416 | Use After Free |
+| CWE-476 | NULL Pointer Dereference |
 | CWE-676 | Use of Potentially Dangerous Function |
+| CWE-787 | Out-of-bounds Write |
 
 ## Requirements
 
@@ -36,7 +39,7 @@ An AI-powered security vulnerability scanner for C/C++ source files. It analyzes
 - `pycparser` (optional — enables AST mode, strongly recommended)
 - [Ollama](https://ollama.ai) running locally or remotely **or** a Google Gemini API key
 
-Install Python dependencies into the provided virtual environment:
+Install Python dependencies:
 
 ```bash
 source venv/bin/activate
@@ -67,7 +70,7 @@ export LLM_BACKEND=gemini
 export GEMINI_API_KEY=<your-api-key>
 ```
 
-The Gemini model used is `gemini-2.0-flash`.
+Model used: `gemini-2.0-flash`.
 
 ### Environment variable summary
 
@@ -145,16 +148,14 @@ test_ast_env.py       # Checks pycparser availability
 ## Running Tests
 
 ```bash
-source venv/bin/activate
-
-# Run all unit tests
-python -m unittest test_ai_reviewer.py
+# Run all unit tests (uses system python3; test file handles the OpenSSL workaround)
+python3 -m unittest test_ai_reviewer.py
 
 # Run a single test
-python -m unittest test_ai_reviewer.TestContextBuilder.test_prune_context_removes_line_comments
+python3 -m unittest test_ai_reviewer.TestLLMClient.test_review_code_gemini_success
 
 # Check AST library availability
-python test_ast_env.py
+python3 test_ast_env.py
 ```
 
 ## Utilities
@@ -162,18 +163,20 @@ python test_ast_env.py
 **Convert the request log to Markdown** (useful for reviewing what was sent to the model):
 
 ```bash
-python format_log.py                        # reads ai_request_log.jsonl
-python format_log.py path/to/custom.jsonl   # reads a specific log file
+python3 format_log.py                        # reads ai_request_log.jsonl
+python3 format_log.py path/to/custom.jsonl   # reads a specific log file
 ```
 
 Output is written to `<input>.md` next to the log file.
 
 ## Architecture Notes
 
-1. **Include merging** — `read_code_file()` recursively inlines `#include "..."` files, inserting `// --- FILE: name LINE: N ---` markers so that line numbers in the final report map back to the original per-file line numbers.
+1. **Include merging** — `read_code_file()` recursively inlines `#include "..."` files, inserting `// --- FILE: name LINE: N ---` markers so line numbers in the final report map back to per-file originals. Angle-bracket system includes are skipped. Companion `.c` files are pulled in alongside their `.h`.
 
-2. **AST path** — when `pycparser` is available, `analyze_ast()` strips preprocessor directives, injects fake typedefs for common C types (`uint8_t`, `size_t`, `FILE`, etc.), and parses the code. If `pycparser` fails (e.g., on macro-heavy code), `_find_functions_regex()` is used as a secondary fallback.
+2. **AST path** — when `pycparser` is available, `analyze_ast()` strips preprocessor directives, injects fake typedefs for common C types (`uint8_t`, `size_t`, `FILE`, etc.), and parses the code. If `pycparser` fails (e.g., on macro-heavy code), `_find_functions_regex()` is used as a brace-depth heuristic fallback.
 
 3. **Context injection** — for each target function, the system prompt instructs the model to report issues only in that function. Header content and callees are passed as supporting context so the model understands data flow without inflating results.
 
-4. **Prompt logging** — every request is logged to `ai_request_log.jsonl` as newline-delimited JSON, preserving the full system and user prompt for debugging.
+4. **LLM dispatch** — `llm_client.py` reads `LLM_BACKEND` at import time and routes `review_code()` calls to either `_review_ollama()` or `_review_gemini()`. Only the selected backend's credentials are validated.
+
+5. **Prompt logging** — every request is logged to `ai_request_log.jsonl` as newline-delimited JSON, preserving the full system and user prompt for debugging.

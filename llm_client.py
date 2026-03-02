@@ -96,8 +96,51 @@ def review_code(system_prompt, user_prompt, func_name=None):
     return _review_ollama(system_prompt, user_prompt)
 
 
+def _repair_unescaped_quotes(text):
+    """
+    Escape bare double-quotes that the LLM embedded inside JSON string values.
+    Uses a single-pass scanner: when inside a string, a '"' is treated as the
+    closing delimiter only if the next non-space character is a JSON structural
+    token (`,  }  ]  :  newline`).  Otherwise it is escaped in-place.
+    """
+    result = []
+    in_string = False
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == '\\' and in_string:
+            # Already-escaped sequence — pass both characters through untouched.
+            result.append(c)
+            i += 1
+            if i < n:
+                result.append(text[i])
+                i += 1
+            continue
+        if c == '"':
+            if not in_string:
+                in_string = True
+                result.append(c)
+            else:
+                # Peek at the next non-space character to decide.
+                j = i + 1
+                while j < n and text[j] in ' \t':
+                    j += 1
+                if j >= n or text[j] in (',', '}', ']', ':', '\n', '\r'):
+                    in_string = False
+                    result.append(c)
+                else:
+                    result.append('\\"')
+            i += 1
+            continue
+        result.append(c)
+        i += 1
+    return ''.join(result)
+
+
 def _parse_llm_json(text):
-    """Parse LLM response as JSON. Strips markdown code fences if present."""
+    """Parse LLM response as JSON. Strips markdown code fences if present.
+    Falls back to a quote-repair pass before giving up."""
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r'^```(?:json)?\s*', '', text)
@@ -105,5 +148,9 @@ def _parse_llm_json(text):
         text = text.strip()
     try:
         return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(_repair_unescaped_quotes(text))
     except json.JSONDecodeError:
         return {"raw": text}

@@ -8,6 +8,9 @@ from context_builder import (
     read_code_file, prune_context, analyze_ast,
     _build_file_map, _extract_file_sections,
     _build_system_prompt, _build_user_prompt,
+    build_call_clusters,
+    _build_cross_function_system_prompt,
+    _build_cross_function_user_prompt,
 )
 from llm_client import MODEL_NAME, review_code, _parse_llm_json
 
@@ -80,6 +83,32 @@ def main():
                 raw = review_code(system_prompt, user_prompt, func_name=func_name)
                 entry = _parse_llm_json(raw)
                 report["functions"].append(entry)
+
+            # --- Cross-function pass ---
+            print("Running cross-function analysis pass...", file=sys.stderr)
+            clusters = build_call_clusters(functions, target_funcs)
+            if clusters:
+                cross_function_results = []
+                system_prompt_cf = _build_cross_function_system_prompt()
+                for cluster_idx, cluster in enumerate(clusters, start=1):
+                    cluster_names = sorted(cluster)
+                    print(
+                        f"  [cluster {cluster_idx}/{len(clusters)}] "
+                        f"Analyzing: {', '.join(cluster_names)}",
+                        file=sys.stderr,
+                    )
+                    cluster_sources = {n: functions[n]['source'] for n in cluster_names}
+                    user_prompt_cf = _build_cross_function_user_prompt(cluster_sources)
+                    raw_cf = review_code(
+                        system_prompt_cf, user_prompt_cf,
+                        func_name=f"__cross_function_cluster_{cluster_idx}",
+                    )
+                    parsed_cf = _parse_llm_json(raw_cf)
+                    findings = parsed_cf.get("cross_function_vulnerabilities", [])
+                    if findings:
+                        cross_function_results.extend(findings)
+                if cross_function_results:
+                    report["cross_function"] = cross_function_results
     else:
         print("Pruning code context...", file=sys.stderr)
         pruned_content = prune_context(code_content)

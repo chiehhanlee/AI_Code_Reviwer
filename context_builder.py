@@ -70,6 +70,36 @@ Respond with a JSON object only — no prose, no markdown fences. Schema:
 }
 List ALL vulnerabilities found — one object per issue. If no vulnerabilities are found, return an empty "vulnerabilities" array."""
 
+CROSS_FUNCTION_CWES = """\
+1. CWE-401: Memory Leak — memory allocated in one function never freed by any caller in this cluster.
+2. CWE-415: Double Free — the same pointer is freed more than once across functions.
+3. CWE-416: Use After Free — a pointer is freed in one function then dereferenced in another.
+4. CWE-476: NULL Pointer Dereference — a callee can return NULL and its caller \
+dereferences the result without a NULL check."""
+
+OUTPUT_FORMAT_CROSS_FUNCTION = """\
+Respond with a JSON object only — no prose, no markdown fences. Schema:
+{
+  "cross_function_vulnerabilities": [
+    {
+      "functions_involved": ["<func1>", "<func2>"],
+      "file": "<filename from the '// File:' header of the function where the bug manifests>",
+      "line": <approximate line number as integer>,
+      "description": "<CWE-NNN: one sentence naming the specific pointer/variable>"
+    }
+  ]
+}
+"file" must be the filename shown in the `// File:` comment at the top of the function \
+source where the dangerous operation occurs (the dereference for CWE-416/CWE-476, \
+the second free for CWE-415, the allocation site for CWE-401).
+Attribution rules for "functions_involved" (use the Memory Role Summary above to guide you):
+- CWE-416: include the FREER function and the DEREFERENCER function. Omit the allocator.
+- CWE-415: include the caller that triggers free() twice and the FREER function. Omit the allocator.
+- CWE-401: include the ALLOCATOR function and the caller that never frees it.
+- CWE-476: include the function that can return NULL and the caller that dereferences without checking.
+List ALL inter-procedural vulnerabilities — one object per issue. \
+If none found, return an empty "cross_function_vulnerabilities" array."""
+
 # --- AST Parsing Classes ---
 try:
     from pycparser import c_parser, c_ast
@@ -440,3 +470,118 @@ def _build_user_prompt(code_content, func_name=None, context_code=""):
             f"## Code\n"
             f"```c\n{code_content}\n```\n"
         )
+
+
+def build_call_clusters(functions, target_funcs, max_cluster_size=8):
+    """
+    Return weakly-connected components of the call graph seeded by target_funcs.
+    Callee functions defined anywhere in `functions` (including included files)
+    are added as secondary nodes so that cross-file call chains are captured.
+    Every returned cluster must contain at least one target function.
+    Singletons are excluded.
+    Clusters larger than max_cluster_size are replaced by per-node
+    ego-neighborhoods (node + its direct call neighbors in the cluster).
+    """
+    # Seed with target functions; pull in any callee that exists in the codebase.
+    nodes = set(target_funcs.keys())
+    for fname in target_funcs:
+        for callee in target_funcs[fname]['calls']:
+            if callee in functions:
+                nodes.add(callee)
+
+    parent = {n: n for n in nodes}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for fname in nodes:
+        data = target_funcs.get(fname) or functions.get(fname, {})
+        for callee in data.get('calls', []):
+            if callee in nodes and callee != fname:
+                union(fname, callee)
+
+    target_set = set(target_funcs.keys())
+    components = {}
+    for fname in nodes:
+        components.setdefault(find(fname), set()).add(fname)
+
+    result = []
+    for comp in components.values():
+        if not (comp & target_set):   # must include at least one target function
+            continue
+        if len(comp) < 2:
+            continue
+        if len(comp) <= max_cluster_size:
+            result.append(comp)
+        else:
+            seen = set()
+            for node in comp:
+                node_data = target_funcs.get(node) or functions.get(node, {})
+                callers = {n for n in comp
+                           if node in (target_funcs.get(n) or functions.get(n, {})).get('calls', [])}
+                callees = {c for c in node_data.get('calls', []) if c in comp and c != node}
+                neighborhood = frozenset({node} | callers | callees)
+                if len(neighborhood) >= 2 and neighborhood not in seen:
+                    seen.add(neighborhood)
+                    result.append(set(neighborhood))
+    return result
+
+
+def _build_cross_function_system_prompt():
+    return (
+        f"{ROLE}\n\n"
+        "## Task\n"
+        "Analyze the following group of C functions for inter-procedural "
+        "(cross-function) security vulnerabilities — bugs that only become "
+        "visible when multiple functions are considered together.\n\n"
+        "Do NOT report single-function vulnerabilities (buffer overflows, "
+        "format strings, etc.) — those are handled separately. Report ONLY "
+        "vulnerabilities that require reasoning across at least two of the "
+        "provided functions.\n\n"
+        f"## Focus Areas\n{CROSS_FUNCTION_CWES}\n\n"
+        f"## Output Format\n{OUTPUT_FORMAT_CROSS_FUNCTION}"
+    )
+
+
+_ALLOC_RE = re.compile(r'\b(malloc|calloc|realloc|strdup|strndup)\s*\(')
+_FREE_RE = re.compile(r'\bfree\s*\(')
+
+
+def _classify_function_role(source):
+    """Return a short memory-role label derived from the function's source."""
+    allocs = bool(_ALLOC_RE.search(source))
+    frees = bool(_FREE_RE.search(source))
+    if allocs and frees:
+        return "ALLOCATES and FREES memory"
+    if allocs:
+        return "ALLOCATES memory (returns pointer to caller)"
+    if frees:
+        return "FREES memory (calls free() on its argument)"
+    return "USES or ORCHESTRATES (no direct alloc/free)"
+
+
+def _build_cross_function_user_prompt(cluster_sources):
+    """
+    cluster_sources: dict[str, str] — {func_name: source_text} for each
+    function in the cluster (source_text from extract_function_source).
+    """
+    parts = [
+        "## Functions Under Analysis\n",
+        "Analyze these functions together for inter-procedural vulnerabilities.\n",
+        "\n## Memory Role Summary",
+        "Use these roles when deciding which functions to list in `functions_involved`:",
+    ]
+    for fname, source in cluster_sources.items():
+        parts.append(f"- `{fname}`: {_classify_function_role(source)}")
+
+    for fname, source in cluster_sources.items():
+        parts.append(f"\n### Function: `{fname}`\n```c\n{source}\n```")
+    return "\n".join(parts)

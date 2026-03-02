@@ -5,12 +5,14 @@ sys.modules["OpenSSL"] = None  # broken OpenSSL workaround — must precede llm_
 import os
 os.environ.setdefault("OLLAMA_HOST", "http://localhost:11434")  # required for llm_client import
 
+import json
 import unittest
 from unittest.mock import patch, MagicMock, mock_open
 import requests
 
 import context_builder
 import llm_client
+import ai_code_reviewer
 
 
 class TestContextBuilder(unittest.TestCase):
@@ -52,6 +54,187 @@ class TestContextBuilder(unittest.TestCase):
             "int foo() {}", func_name="foo", context_code="int bar() {}")
         self.assertIn("Supporting Context", prompt)
         self.assertIn("int bar() {}", prompt)
+
+    # --- build_call_clusters tests ---
+
+    def test_build_call_clusters_singleton_skipped(self):
+        funcs = {'foo': {'calls': [], 'source': '', 'file': 'test.c'}}
+        result = context_builder.build_call_clusters(funcs, funcs)
+        self.assertEqual(result, [])
+
+    def test_build_call_clusters_two_function_cluster(self):
+        funcs = {
+            'foo': {'calls': ['bar'], 'source': '', 'file': 'test.c'},
+            'bar': {'calls': ['foo'], 'source': '', 'file': 'test.c'},
+        }
+        result = context_builder.build_call_clusters(funcs, funcs)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], {'foo', 'bar'})
+
+    def test_build_call_clusters_unidirectional_edge(self):
+        funcs = {
+            'foo': {'calls': ['bar'], 'source': '', 'file': 'test.c'},
+            'bar': {'calls': [], 'source': '', 'file': 'test.c'},
+        }
+        result = context_builder.build_call_clusters(funcs, funcs)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], {'foo', 'bar'})
+
+    def test_build_call_clusters_includes_callee_from_other_file(self):
+        # A target function calling a function defined in an included file
+        # should form a cluster so cross-file chains are detected.
+        all_funcs = {
+            'foo': {'calls': ['bar'], 'source': '', 'file': 'main.c'},
+            'bar': {'calls': [], 'source': '', 'file': 'other.c'},
+        }
+        target_funcs = {'foo': all_funcs['foo']}
+        result = context_builder.build_call_clusters(all_funcs, target_funcs)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], {'foo', 'bar'})
+
+    def test_build_call_clusters_excludes_unknown_callee(self):
+        # Callees not defined in the codebase (e.g. system calls) are not nodes.
+        funcs = {'foo': {'calls': ['printf'], 'source': '', 'file': 'test.c'}}
+        result = context_builder.build_call_clusters(funcs, funcs)
+        self.assertEqual(result, [])
+
+    def test_build_call_clusters_oversized_split(self):
+        # 9-node linear chain: 0→1→2→...→8, max_cluster_size=8
+        funcs = {str(i): {'calls': [str(i + 1)], 'source': '', 'file': 'test.c'}
+                 for i in range(8)}
+        funcs['8'] = {'calls': [], 'source': '', 'file': 'test.c'}
+        result = context_builder.build_call_clusters(funcs, funcs, max_cluster_size=8)
+        self.assertTrue(len(result) > 0)
+        for cluster in result:
+            self.assertLessEqual(len(cluster), 3)
+
+    def test_build_call_clusters_two_independent_components(self):
+        funcs = {
+            'a': {'calls': ['b'], 'source': '', 'file': 'test.c'},
+            'b': {'calls': [], 'source': '', 'file': 'test.c'},
+            'c': {'calls': ['d'], 'source': '', 'file': 'test.c'},
+            'd': {'calls': [], 'source': '', 'file': 'test.c'},
+        }
+        result = context_builder.build_call_clusters(funcs, funcs)
+        self.assertEqual(len(result), 2)
+        cluster_sets = [frozenset(c) for c in result]
+        self.assertIn(frozenset({'a', 'b'}), cluster_sets)
+        self.assertIn(frozenset({'c', 'd'}), cluster_sets)
+
+    # --- cross-function prompt tests ---
+
+    def test_cross_function_system_prompt_contains_cwes(self):
+        prompt = context_builder._build_cross_function_system_prompt()
+        for cwe in ['CWE-401', 'CWE-415', 'CWE-416', 'CWE-476']:
+            self.assertIn(cwe, prompt)
+
+    def test_cross_function_system_prompt_schema_keys(self):
+        prompt = context_builder._build_cross_function_system_prompt()
+        self.assertIn('cross_function_vulnerabilities', prompt)
+        self.assertIn('functions_involved', prompt)
+        self.assertIn('"file"', prompt)
+
+    def test_cross_function_user_prompt_includes_all_functions(self):
+        cluster_sources = {
+            'foo': 'void foo() { bar(); }',
+            'bar': 'void bar() {}',
+        }
+        prompt = context_builder._build_cross_function_user_prompt(cluster_sources)
+        self.assertIn('foo', prompt)
+        self.assertIn('bar', prompt)
+        self.assertIn('void foo() { bar(); }', prompt)
+        self.assertIn('void bar() {}', prompt)
+
+
+class TestCrossFunctionPass(unittest.TestCase):
+
+    def _make_functions(self, call_graph, filename='test.c'):
+        return {
+            fname: {
+                'source': f'void {fname}() {{}}',
+                'calls': callees,
+                'file': filename,
+            }
+            for fname, callees in call_graph.items()
+        }
+
+    def _run_main(self, functions, review_side_effect):
+        """Run main() with mocked dependencies; return the captured report dict."""
+        report_holder = {}
+
+        def capture_dump(data, f, **kwargs):
+            report_holder.update(data)
+
+        with patch('sys.argv', ['prog', 'test.c']), \
+             patch('ai_code_reviewer.HAS_PYCPARSER', True), \
+             patch('ai_code_reviewer.read_code_file', return_value=''), \
+             patch('ai_code_reviewer.analyze_ast', return_value=functions), \
+             patch('ai_code_reviewer._build_file_map', return_value=[]), \
+             patch('ai_code_reviewer._extract_file_sections', return_value={}), \
+             patch('ai_code_reviewer.review_code', side_effect=review_side_effect), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump', side_effect=capture_dump):
+            ai_code_reviewer.main()
+
+        return report_holder
+
+    def test_cross_function_key_populated(self):
+        funcs = self._make_functions({'foo': ['bar'], 'bar': []})
+        cf_json = ('{"cross_function_vulnerabilities": [{'
+                   '"functions_involved": ["foo", "bar"], '
+                   '"line": 10, "description": "CWE-416: UAF"}]}')
+        responses = [
+            '{"function": "foo", "vulnerabilities": []}',
+            '{"function": "bar", "vulnerabilities": []}',
+            cf_json,
+        ]
+        report = self._run_main(funcs, responses)
+        self.assertIn('cross_function', report)
+        self.assertEqual(len(report['cross_function']), 1)
+
+    def test_cross_function_key_absent_no_clusters(self):
+        funcs = self._make_functions({'foo': [], 'bar': []})
+        responses = [
+            '{"function": "foo", "vulnerabilities": []}',
+            '{"function": "bar", "vulnerabilities": []}',
+        ]
+        report = self._run_main(funcs, responses)
+        self.assertNotIn('cross_function', report)
+
+    def test_cross_function_key_absent_empty_llm(self):
+        funcs = self._make_functions({'foo': ['bar'], 'bar': []})
+        responses = [
+            '{"function": "foo", "vulnerabilities": []}',
+            '{"function": "bar", "vulnerabilities": []}',
+            '{"cross_function_vulnerabilities": []}',
+        ]
+        report = self._run_main(funcs, responses)
+        self.assertNotIn('cross_function', report)
+
+    def test_cross_function_review_called_with_cluster_func_name(self):
+        funcs = self._make_functions({'foo': ['bar'], 'bar': []})
+        call_func_names = []
+
+        def mock_review(system_prompt, user_prompt, func_name=None):
+            call_func_names.append(func_name)
+            if func_name and func_name.startswith('__cross_function_cluster_'):
+                return '{"cross_function_vulnerabilities": []}'
+            return f'{{"function": "{func_name}", "vulnerabilities": []}}'
+
+        with patch('sys.argv', ['prog', 'test.c']), \
+             patch('ai_code_reviewer.HAS_PYCPARSER', True), \
+             patch('ai_code_reviewer.read_code_file', return_value=''), \
+             patch('ai_code_reviewer.analyze_ast', return_value=funcs), \
+             patch('ai_code_reviewer._build_file_map', return_value=[]), \
+             patch('ai_code_reviewer._extract_file_sections', return_value={}), \
+             patch('ai_code_reviewer.review_code', side_effect=mock_review), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump', lambda *a, **k: None):
+            ai_code_reviewer.main()
+
+        cf_calls = [n for n in call_func_names
+                    if n and n.startswith('__cross_function_cluster_')]
+        self.assertGreaterEqual(len(cf_calls), 1)
 
 
 class TestLLMClient(unittest.TestCase):

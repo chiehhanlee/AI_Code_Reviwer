@@ -9,7 +9,7 @@ import re
 
 INCLUDE_DIRS = []  # additional header/source search paths (like -I flags)
 
-ROLE = "You are an  C/C++ security code reviewe expert using english"
+ROLE = "You are an C/C++ security code review expert using english"
 
 FOCUS_AREAS = """\
 1. CWE-121: Stack-based Buffer Overflow - Occurs when the buffer is on the stack, often leading to immediate control flow hijacking.\
@@ -21,8 +21,11 @@ FOCUS_AREAS = """\
 7. CWE-416: Use After Free (UAF): A program continues to use a pointer after it has been freed, a common and severe vulnerability that can lead to arbitrary code execution.\
 8. CWE-119: Improper Restriction of Operations within the Bounds of a Memory Buffer: General class of buffer errors that can cause memory corruption.\
 9. CWE-125: Out-of-bounds Read: Accessing memory outside of the intended buffer can expose sensitive information. \
-10. CWE-20 Input validation failures\
-11. CWE-676: Use of Potentially Dangerous Function"""
+10. CWE-20 Input validation failures.\
+11. CWE-676: Use of Potentially Dangerous Function.\
+12. CWE-787: Out-of-bounds Write.\
+13. CWE-120: Buffer Copy without Checking Size of Input.\
+14. CWE-476: NULL Pointer Dereference"""
 
 CONTEXT_SECTION_TEMPLATE = """\
 ## Supporting Context

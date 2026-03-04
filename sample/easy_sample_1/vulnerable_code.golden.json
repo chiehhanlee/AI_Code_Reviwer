@@ -1,0 +1,50 @@
+{
+  "file": "sample/easy_sample_1/vulnerable_code.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "vulnerable_function",
+      "file": "vulnerable_code.c",
+      "vulnerabilities": [
+        {
+          "line": 9,
+          "CWE_ID": "CWE-121",
+          "description": "strcpy copies user-controlled input into a fixed 100-byte stack buffer without bounds checking, enabling stack-based buffer overflow."
+        },
+        {
+          "line": 14,
+          "CWE_ID": "CWE-134",
+          "description": "printf uses buffer (populated from untrusted input) directly as the format string, allowing format string injection to read or corrupt memory."
+        }
+      ]
+    },
+    {
+      "function": "integer_overflow_example",
+      "file": "vulnerable_code.c",
+      "vulnerabilities": [
+        {
+          "line": 21,
+          "CWE_ID": "CWE-190",
+          "description": "count * sizeof(int) overflows when count exceeds INT_MAX/sizeof(int), producing a smaller-than-expected size passed to malloc."
+        },
+        {
+          "line": 26,
+          "CWE_ID": "CWE-122",
+          "description": "arr[i] writes count elements into a heap buffer allocated with the wrapped (too-small) size, causing heap-based buffer overflow."
+        }
+      ]
+    },
+    {
+      "function": "main",
+      "file": "vulnerable_code.c",
+      "vulnerabilities": [
+        {
+          "line": 39,
+          "CWE_ID": "CWE-20",
+          "description": "argv[1] is passed to vulnerable_function without validating its length, allowing arbitrarily long input to reach the fixed-size buffer copy."
+        }
+      ]
+    }
+  ]
+}

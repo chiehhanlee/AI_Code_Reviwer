@@ -1,0 +1,39 @@
+{
+  "file": "sample/easy_sample_2/main_complex.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "main",
+      "file": "main_complex.c",
+      "vulnerabilities": [
+        {
+          "line": 22,
+          "CWE_ID": "CWE-416",
+          "description": "process_user_command(alice, \"logout\") is called on line 22 after delete_user(alice) freed alice on line 14, dereferencing a freed pointer."
+        },
+        {
+          "line": 26,
+          "CWE_ID": "CWE-415",
+          "description": "delete_user(alice) is called a second time on line 26 after alice was already freed on line 14, causing a double free of the same User pointer."
+        }
+      ]
+    }
+  ],
+  "cross_function": [
+    {
+      "functions_involved": ["delete_user", "process_user_command"],
+      "file": "user_manager.c",
+      "line": 36,
+      "CWE_ID": "CWE-416",
+      "description": "main frees alice via delete_user (line 14) then passes the dangling pointer to process_user_command (line 22), which dereferences user->username on a freed object."
+    },
+    {
+      "functions_involved": ["main", "delete_user"],
+      "file": "user_manager.c",
+      "line": 22,
+      "CWE_ID": "CWE-415",
+      "description": "main calls delete_user(alice) twice (lines 14 and 26), triggering free() on the same pointer twice inside delete_user."
+    }
+  ]
+}

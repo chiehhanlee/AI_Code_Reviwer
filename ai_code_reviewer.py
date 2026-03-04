@@ -11,6 +11,7 @@ from context_builder import (
     build_call_clusters,
     _build_cross_function_system_prompt,
     _build_cross_function_user_prompt,
+    SCHEMA_FUNCTION, SCHEMA_FULL_FILE, SCHEMA_CROSS_FUNCTION,
 )
 from llm_client import MODEL_NAME, review_code, _parse_llm_json
 
@@ -47,7 +48,7 @@ def main():
             report["mode"] = "full-file"
             system_prompt = _build_system_prompt()
             user_prompt = _build_user_prompt(pruned_content)
-            report.update(_parse_llm_json(review_code(system_prompt, user_prompt)))
+            report.update(_parse_llm_json(review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)))
         else:
             target_basename = os.path.basename(filepath)
             target_funcs = {n: d for n, d in functions.items()
@@ -80,7 +81,7 @@ def main():
                 system_prompt = _build_system_prompt(func_name=func_name)
                 user_prompt = _build_user_prompt(data['source'], func_name=func_name,
                                                  context_code=context_code)
-                raw = review_code(system_prompt, user_prompt, func_name=func_name)
+                raw = review_code(system_prompt, user_prompt, func_name=func_name, schema=SCHEMA_FUNCTION)
                 entry = _parse_llm_json(raw)
                 report["functions"].append(entry)
 
@@ -102,6 +103,7 @@ def main():
                     raw_cf = review_code(
                         system_prompt_cf, user_prompt_cf,
                         func_name=f"__cross_function_cluster_{cluster_idx}",
+                        schema=SCHEMA_CROSS_FUNCTION,
                     )
                     parsed_cf = _parse_llm_json(raw_cf)
                     findings = parsed_cf.get("cross_function_vulnerabilities", [])
@@ -115,7 +117,7 @@ def main():
         report["mode"] = "full-file"
         system_prompt = _build_system_prompt()
         user_prompt = _build_user_prompt(pruned_content)
-        report.update(_parse_llm_json(review_code(system_prompt, user_prompt)))
+        report.update(_parse_llm_json(review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)))
 
     with open(output_path, 'w') as f:
         json.dump(report, f, indent=2)

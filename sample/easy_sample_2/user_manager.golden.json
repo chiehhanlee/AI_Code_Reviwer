@@ -1,0 +1,50 @@
+{
+  "file": "sample/easy_sample_2/user_manager.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "create_user",
+      "file": "user_manager.c",
+      "vulnerabilities": [
+        {
+          "line": 12,
+          "CWE_ID": "CWE-476",
+          "description": "strdup(username) return value is not checked for NULL; a failed heap allocation leaves newUser->username as NULL, causing a NULL pointer dereference on later access."
+        },
+        {
+          "line": 13,
+          "CWE_ID": "CWE-401",
+          "description": "If strdup(password) fails after strdup(username) succeeded, newUser->username and newUser are leaked because there is no cleanup path for partial allocation failure."
+        }
+      ]
+    },
+    {
+      "function": "delete_user",
+      "file": "user_manager.c",
+      "vulnerabilities": [
+        {
+          "line": 23,
+          "CWE_ID": "CWE-416",
+          "description": "user->username, user->password, and user are freed but the caller's pointer is not cleared, leaving a dangling pointer in the caller that enables use-after-free."
+        }
+      ]
+    },
+    {
+      "function": "db_connect",
+      "file": "user_manager.c",
+      "vulnerabilities": []
+    },
+    {
+      "function": "process_user_command",
+      "file": "user_manager.c",
+      "vulnerabilities": [
+        {
+          "line": 36,
+          "CWE_ID": "CWE-476",
+          "description": "user and user->username are dereferenced without a NULL check; passing a freed or NULL pointer causes a NULL pointer dereference crash."
+        }
+      ]
+    }
+  ]
+}

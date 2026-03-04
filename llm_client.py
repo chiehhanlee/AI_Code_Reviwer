@@ -41,14 +41,15 @@ _GEMINI_MODEL = "gemini-2.0-flash"
 MODEL_NAME = _GEMINI_MODEL if ACTIVE_BACKEND == "gemini" else _OLLAMA_MODEL
 
 
-def _review_ollama(system_prompt, user_prompt):
+def _review_ollama(system_prompt, user_prompt, schema=None):
     url = f"{OLLAMA_URL}/api/chat"
     messages = [{"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt}]
+    body = {"model": MODEL_NAME, "messages": messages, "stream": False}
+    if schema is not None:
+        body["format"] = schema
     try:
-        response = requests.post(url,
-                                 json={"model": MODEL_NAME, "messages": messages, "stream": False},
-                                 timeout=API_TIMEOUT)
+        response = requests.post(url, json=body, timeout=API_TIMEOUT)
         if response.status_code == 200:
             return response.json().get("message", {}).get("content", "No response text found.")
         return f"API Error {response.status_code}: {response.text}"
@@ -60,12 +61,17 @@ def _review_ollama(system_prompt, user_prompt):
         return f"Error communicating with AI service: {e}"
 
 
-def _review_gemini(system_prompt, user_prompt):
+def _review_gemini(system_prompt, user_prompt, schema=None):
     url = f"{GEMINI_BASE_URL}/{MODEL_NAME}:generateContent?key={GEMINI_API_KEY}"
     body = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
     }
+    if schema is not None:
+        body["generationConfig"] = {
+            "response_mime_type": "application/json",
+            "response_schema": schema,
+        }
     try:
         response = requests.post(url, json=body, timeout=API_TIMEOUT)
         if response.status_code == 200:
@@ -82,7 +88,7 @@ def _review_gemini(system_prompt, user_prompt):
         return f"Error communicating with AI service: {e}"
 
 
-def review_code(system_prompt, user_prompt, func_name=None):
+def review_code(system_prompt, user_prompt, func_name=None, schema=None):
     """Send pre-built prompts to the active LLM backend and return raw response text."""
     log_entry = {"timestamp": datetime.datetime.now().isoformat(),
                  "func_name": func_name,
@@ -92,8 +98,8 @@ def review_code(system_prompt, user_prompt, func_name=None):
         log_file.write(json.dumps(log_entry) + "\n")
 
     if ACTIVE_BACKEND == "gemini":
-        return _review_gemini(system_prompt, user_prompt)
-    return _review_ollama(system_prompt, user_prompt)
+        return _review_gemini(system_prompt, user_prompt, schema=schema)
+    return _review_ollama(system_prompt, user_prompt, schema=schema)
 
 
 def _repair_unescaped_quotes(text):

@@ -37,38 +37,106 @@ vulnerabilities in them.
 ```
 """
 
-OUTPUT_FORMAT_FUNCTION = """\
-Respond with a JSON object only — no prose, no markdown fences. Schema:
-{{
-  "function": "{func_name}",
-  "vulnerabilities": [
-    {{
-      "line": <approximate line number as integer>,
-      "description": "<vulnerability description>"
-    }},
-    {{
-      "line": <approximate line number as integer>,
-      "description": "<vulnerability description>"
-    }}
-  ]
-}}
-List ALL vulnerabilities found — one object per issue. If no vulnerabilities are found, return an empty "vulnerabilities" array."""
+# ---------------------------------------------------------------------------
+# --- JSON Schemas (standard JSON Schema / OpenAPI 3.0 subset) ---------------
+# ---------------------------------------------------------------------------
 
-OUTPUT_FORMAT_FULL_FILE = """\
-Respond with a JSON object only — no prose, no markdown fences. Schema:
-{
-  "vulnerabilities": [
-    {
-      "line": <approximate line number as integer>,
-      "description": "<vulnerability description>"
+_VULNERABILITY_ITEM = {
+    "type": "object",
+    "properties": {
+        "line":        {"type": "integer", "description": "Approximate line number in the source file"},
+        "CWE_ID":      {"type": "string",  "description": "CWE identifier, e.g. CWE-121"},
+        "description": {"type": "string",  "description": "One sentence describing the vulnerability"},
     },
-    {
-      "line": <approximate line number as integer>,
-      "description": "<vulnerability description>"
-    }
-  ]
+    "required": ["line", "CWE_ID", "description"],
 }
-List ALL vulnerabilities found — one object per issue. If no vulnerabilities are found, return an empty "vulnerabilities" array."""
+
+SCHEMA_FUNCTION = {
+    "type": "object",
+    "properties": {
+        "function": {
+            "type": "string",
+            "description": "Name of the analyzed function",
+        },
+        "file": {
+            "type": "string",
+            "description": "Source filename from the '// File:' comment at the top of the function",
+        },
+        "vulnerabilities": {
+            "type": "array",
+            "items": _VULNERABILITY_ITEM,
+            "description": "All vulnerabilities found; empty array if none",
+        },
+    },
+    "required": ["function", "file", "vulnerabilities"],
+}
+
+SCHEMA_FULL_FILE = {
+    "type": "object",
+    "properties": {
+        "vulnerabilities": {
+            "type": "array",
+            "items": _VULNERABILITY_ITEM,
+            "description": "All vulnerabilities found; empty array if none",
+        },
+    },
+    "required": ["vulnerabilities"],
+}
+
+SCHEMA_CROSS_FUNCTION = {
+    "type": "object",
+    "properties": {
+        "cross_function_vulnerabilities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "functions_involved": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of functions involved in the vulnerability",
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Filename where the bug manifests",
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "Approximate line number",
+                    },
+                    "CWE_ID": {
+                        "type": "string",
+                        "description": "CWE identifier, e.g. CWE-416",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One sentence naming the specific pointer/variable",
+                    },
+                },
+                "required": ["functions_involved", "file", "line", "CWE_ID", "description"],
+            },
+            "description": "Inter-procedural vulnerabilities; empty array if none",
+        },
+    },
+    "required": ["cross_function_vulnerabilities"],
+}
+
+# ---------------------------------------------------------------------------
+# --- Output format instructions (semantic; schema is enforced by the API) --
+# ---------------------------------------------------------------------------
+
+OUTPUT_FORMAT_FUNCTION = (
+    "Respond with a JSON object only — no prose, no markdown fences. "
+    'Set "file" to the filename shown in the `// File:` comment at the top of the function source. '
+    "List ALL vulnerabilities found, one object per issue. "
+    'If no vulnerabilities are found, return an empty "vulnerabilities" array.'
+)
+
+OUTPUT_FORMAT_FULL_FILE = (
+    "Respond with a JSON object only — no prose, no markdown fences. "
+    "List ALL vulnerabilities found, one object per issue. "
+    'If no vulnerabilities are found, return an empty "vulnerabilities" array.'
+)
 
 CROSS_FUNCTION_CWES = """\
 1. CWE-401: Memory Leak — memory allocated in one function never freed by any caller in this cluster.
@@ -78,17 +146,7 @@ CROSS_FUNCTION_CWES = """\
 dereferences the result without a NULL check."""
 
 OUTPUT_FORMAT_CROSS_FUNCTION = """\
-Respond with a JSON object only — no prose, no markdown fences. Schema:
-{
-  "cross_function_vulnerabilities": [
-    {
-      "functions_involved": ["<func1>", "<func2>"],
-      "file": "<filename from the '// File:' header of the function where the bug manifests>",
-      "line": <approximate line number as integer>,
-      "description": "<CWE-NNN: one sentence naming the specific pointer/variable>"
-    }
-  ]
-}
+Respond with a JSON object only — no prose, no markdown fences.
 "file" must be the filename shown in the `// File:` comment at the top of the function \
 source where the dangerous operation occurs (the dereference for CWE-416/CWE-476, \
 the second free for CWE-415, the allocation site for CWE-401).
@@ -433,7 +491,6 @@ def read_code_file(filepath, processed_files=None, include_dirs=()):
 
 def _build_system_prompt(func_name=None):
     if func_name:
-        output_format = OUTPUT_FORMAT_FUNCTION.format(func_name=func_name)
         return (
             f"{ROLE}\n\n"
             f"## Task\n"
@@ -441,7 +498,7 @@ def _build_system_prompt(func_name=None):
             f"Focus exclusively on the target function — do not report issues in the "
             f"supporting context functions.\n\n"
             f"## Focus Areas\n{FOCUS_AREAS}\n\n"
-            f"## Output Format\n{output_format}"
+            f"## Output Format\n{OUTPUT_FORMAT_FUNCTION}"
         )
     else:
         return (

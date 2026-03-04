@@ -11,6 +11,7 @@ from context_builder import (
     build_call_clusters,
     _build_cross_function_system_prompt,
     _build_cross_function_user_prompt,
+    _classify_function_role,
     SCHEMA_FUNCTION, SCHEMA_FULL_FILE, SCHEMA_CROSS_FUNCTION,
 )
 from llm_client import MODEL_NAME, review_code, _parse_llm_json
@@ -93,12 +94,33 @@ def main():
                 system_prompt_cf = _build_cross_function_system_prompt()
                 for cluster_idx, cluster in enumerate(clusters, start=1):
                     cluster_names = sorted(cluster)
+                    cluster_sources = {n: functions[n]['source'] for n in cluster_names}
+
+                    # Skip clusters with no unbalanced memory operations — every
+                    # cross-function CWE (401/415/416/476) requires at least one
+                    # function that allocates-without-freeing (escaping pointer) or
+                    # frees-without-allocating (external freer). A cluster whose only
+                    # memory-active function both allocates AND frees internally has
+                    # no cross-boundary concern and would cause LLM hallucinations.
+                    roles = [_classify_function_role(src) for src in cluster_sources.values()]
+                    has_unbalanced = any(
+                        r in ("ALLOCATES memory (returns pointer to caller)",
+                              "FREES memory (calls free() on its argument)")
+                        for r in roles
+                    )
+                    if not has_unbalanced:
+                        print(
+                            f"  [cluster {cluster_idx}/{len(clusters)}] "
+                            f"Skipping {', '.join(cluster_names)} — no unbalanced alloc/free",
+                            file=sys.stderr,
+                        )
+                        continue
+
                     print(
                         f"  [cluster {cluster_idx}/{len(clusters)}] "
                         f"Analyzing: {', '.join(cluster_names)}",
                         file=sys.stderr,
                     )
-                    cluster_sources = {n: functions[n]['source'] for n in cluster_names}
                     user_prompt_cf = _build_cross_function_user_prompt(cluster_sources)
                     raw_cf = review_code(
                         system_prompt_cf, user_prompt_cf,

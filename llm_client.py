@@ -36,7 +36,9 @@ if ACTIVE_BACKEND == "gemini":
         print("[ERROR] GEMINI_API_KEY environment variable is not set.")
         sys.exit(1)
 
-_OLLAMA_MODEL = "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m"
+#_OLLAMA_MODEL = "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m"
+#_OLLAMA_MODEL = "qwen3.5:9b"
+_OLLAMA_MODEL = "dagbs/deepseek-coder-v2-lite-instruct:q4_k_m"
 _GEMINI_MODEL = "gemini-2.0-flash"
 MODEL_NAME = _GEMINI_MODEL if ACTIVE_BACKEND == "gemini" else _OLLAMA_MODEL
 

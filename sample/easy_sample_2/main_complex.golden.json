@@ -8,6 +8,11 @@
       "file": "main_complex.c",
       "vulnerabilities": [
         {
+          "line": 11,
+          "CWE_ID": "CWE-476",
+          "description": "create_user can return NULL on malloc failure, but alice is passed to process_user_command at line 11 without a NULL check, risking NULL pointer dereference."
+        },
+        {
           "line": 22,
           "CWE_ID": "CWE-416",
           "description": "process_user_command(alice, \"logout\") is called on line 22 after delete_user(alice) freed alice on line 14, dereferencing a freed pointer."
@@ -31,9 +36,16 @@
     {
       "functions_involved": ["main", "delete_user"],
       "file": "user_manager.c",
-      "line": 22,
+      "line": 23,
       "CWE_ID": "CWE-415",
       "description": "main calls delete_user(alice) twice (lines 14 and 26), triggering free() on the same pointer twice inside delete_user."
+    },
+    {
+      "functions_involved": ["create_user", "main"],
+      "file": "main_complex.c",
+      "line": 11,
+      "CWE_ID": "CWE-476",
+      "description": "create_user can return NULL on malloc failure, but main passes the unchecked pointer to process_user_command at line 11, which dereferences user->username."
     }
   ]
 }

@@ -14,11 +14,11 @@ API_TIMEOUT   = 300              # seconds per request
 LOG_FILE_PATH = "ai_request_log.jsonl"
 
 ACTIVE_BACKEND = os.getenv("LLM_BACKEND", "ollama").lower()
-if ACTIVE_BACKEND not in ("ollama", "gemini"):
-    print(f"[ERROR] LLM_BACKEND must be 'ollama' or 'gemini', got: {ACTIVE_BACKEND!r}")
+if ACTIVE_BACKEND not in ("ollama", "ollama_cloud", "gemini"):
+    print(f"[ERROR] LLM_BACKEND must be 'ollama', 'ollama_cloud', or 'gemini', got: {ACTIVE_BACKEND!r}")
     sys.exit(1)
 
-# Ollama (only validated when selected)
+# Local Ollama (only validated when selected)
 OLLAMA_URL = ""
 if ACTIVE_BACKEND == "ollama":
     _host = os.getenv("OLLAMA_HOST")
@@ -26,6 +26,19 @@ if ACTIVE_BACKEND == "ollama":
         print("[ERROR] OLLAMA_HOST environment variable is not set.")
         sys.exit(1)
     OLLAMA_URL = _host if _host.startswith("http") else f"http://{_host}"
+
+# Ollama Cloud / ollama.com (only validated when selected)
+OLLAMA_CLOUD_URL = ""
+OLLAMA_CLOUD_API_KEY = ""
+if ACTIVE_BACKEND == "ollama_cloud":
+    OLLAMA_CLOUD_API_KEY = os.getenv("OLLAMA_API_KEY", "")
+    if not OLLAMA_CLOUD_API_KEY:
+        print("[ERROR] OLLAMA_API_KEY environment variable is not set.")
+        sys.exit(1)
+    #_cloud_host = os.getenv("OLLAMA_CLOUD_HOST", "https://api.ollama.com")
+    _cloud_host = os.getenv("OLLAMA_CLOUD_HOST", "https://ollama.com")    
+
+    OLLAMA_CLOUD_URL = _cloud_host.rstrip("/")
 
 # Gemini (only validated when selected)
 GEMINI_API_KEY = ""
@@ -39,8 +52,14 @@ if ACTIVE_BACKEND == "gemini":
 #_OLLAMA_MODEL = "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m"
 #_OLLAMA_MODEL = "qwen3.5:9b"
 _OLLAMA_MODEL = "dagbs/deepseek-coder-v2-lite-instruct:q4_k_m"
+_OLLAMA_CLOUD_MODEL = os.getenv("OLLAMA_CLOUD_MODEL", "qwen3-coder-next:cloud")
 _GEMINI_MODEL = "gemini-2.0-flash"
-MODEL_NAME = _GEMINI_MODEL if ACTIVE_BACKEND == "gemini" else _OLLAMA_MODEL
+if ACTIVE_BACKEND == "gemini":
+    MODEL_NAME = _GEMINI_MODEL
+elif ACTIVE_BACKEND == "ollama_cloud":
+    MODEL_NAME = _OLLAMA_CLOUD_MODEL
+else:
+    MODEL_NAME = _OLLAMA_MODEL
 
 
 def _review_ollama(system_prompt, user_prompt, schema=None):
@@ -59,6 +78,29 @@ def _review_ollama(system_prompt, user_prompt, schema=None):
         return f"Error: Request to Ollama timed out after {API_TIMEOUT} seconds."
     except requests.exceptions.ConnectionError:
         return f"Error: Could not connect to Ollama at {OLLAMA_URL}. Is Ollama running?"
+    except Exception as e:
+        return f"Error communicating with AI service: {e}"
+
+
+def _review_ollama_cloud(system_prompt, user_prompt, schema=None):
+    #url = f"{OLLAMA_CLOUD_URL}/v1/chat/completions"
+    url = "https://ollama.com/api/chat"
+    headers = {"Authorization": f"Bearer {OLLAMA_CLOUD_API_KEY}",
+               "Content-Type": "application/json"}
+    messages = [{"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt}]
+    body = {"model": MODEL_NAME, "messages": messages, "stream": False}
+    if schema is not None:
+        body["format"] = schema
+    try:
+        response = requests.post(url, json=body, headers=headers, timeout=API_TIMEOUT)
+        if response.status_code == 200:
+            return response.json().get("message", {}).get("content", "No response text found.")
+        return f"API Error {response.status_code}: {response.text}"
+    except requests.exceptions.Timeout:
+        return f"Error: Request to Ollama Cloud timed out after {API_TIMEOUT} seconds."
+    except requests.exceptions.ConnectionError:
+        return f"Error: Could not connect to Ollama Cloud at {OLLAMA_CLOUD_URL}."
     except Exception as e:
         return f"Error communicating with AI service: {e}"
 
@@ -101,6 +143,8 @@ def review_code(system_prompt, user_prompt, func_name=None, schema=None):
 
     if ACTIVE_BACKEND == "gemini":
         return _review_gemini(system_prompt, user_prompt, schema=schema)
+    if ACTIVE_BACKEND == "ollama_cloud":
+        return _review_ollama_cloud(system_prompt, user_prompt, schema=schema)
     return _review_ollama(system_prompt, user_prompt, schema=schema)
 
 

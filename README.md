@@ -1,6 +1,6 @@
 # AI C/C++ Security Code Reviewer
 
-An AI-powered security vulnerability scanner for C/C++ source files. It performs a **two-pass analysis** — first auditing each function individually, then running a dedicated cross-function pass to catch inter-procedural bugs invisible to single-function analysis. Supports two LLM backends: a local [Ollama](https://ollama.ai) instance or Google Gemini Flash.
+An AI-powered security vulnerability scanner for C/C++ source files. It performs a **two-pass analysis** — first auditing each function individually, then running a dedicated cross-function pass to catch inter-procedural bugs invisible to single-function analysis. Supports three LLM backends: a local [Ollama](https://ollama.ai) instance, [Ollama Cloud](https://ollama.com) (ollama.com), or Google Gemini Flash.
 
 ## Features
 
@@ -12,7 +12,7 @@ An AI-powered security vulnerability scanner for C/C++ source files. It performs
 - **Recursive include merging** — inlines local `#include "..."` headers and companion `.c` files before analysis
 - **Regex fallback** — falls back to brace-depth heuristics when `pycparser` cannot parse macro-heavy code
 - **Full-file fallback** — if AST extraction fails entirely, sends the minified whole file as a single request
-- **Dual LLM backends** — switch between Ollama and Google Gemini Flash via an environment variable
+- **Three LLM backends** — switch between local Ollama, Ollama Cloud (ollama.com), and Google Gemini Flash via an environment variable
 - **Robust JSON repair** — fixes LLM responses that embed unescaped double-quotes inside string values before falling back to raw storage
 - **JSON audit reports** — results written to `<source>.audit.json`
 - **Request logging** — every prompt sent to the LLM is appended to `ai_request_log.jsonl`
@@ -52,7 +52,7 @@ An AI-powered security vulnerability scanner for C/C++ source files. It performs
 - Python 3.8+
 - `requests` library
 - `pycparser` (optional — enables AST mode, strongly recommended)
-- [Ollama](https://ollama.ai) running locally or remotely **or** a Google Gemini API key
+- [Ollama](https://ollama.ai) running locally **or** an [Ollama Cloud](https://ollama.com) API key **or** a Google Gemini API key
 
 Install Python dependencies:
 
@@ -65,7 +65,7 @@ pip install requests pycparser
 
 Select a backend with `LLM_BACKEND` (default: `ollama`).
 
-### Ollama backend (default)
+### Ollama backend (default, local)
 
 ```bash
 export LLM_BACKEND=ollama          # optional — ollama is the default
@@ -75,7 +75,19 @@ export OLLAMA_HOST="http://localhost:11434"
 Pull the model if you haven't already:
 
 ```bash
-ollama pull dagbs/deepseek-coder-v2-lite-instruct:q3_k_m
+ollama pull dagbs/deepseek-coder-v2-lite-instruct:q4_k_m
+```
+
+Model used: `dagbs/deepseek-coder-v2-lite-instruct:q4_k_m`.
+
+### Ollama Cloud backend (ollama.com)
+
+```bash
+export LLM_BACKEND=ollama_cloud
+export OLLAMA_API_KEY=<your-ollama.com-api-key>
+# Optional overrides:
+# export OLLAMA_CLOUD_HOST=https://ollama.com   # default
+# export OLLAMA_CLOUD_MODEL=qwen3-coder-next:cloud  # default
 ```
 
 ### Gemini backend
@@ -93,6 +105,9 @@ Model used: `gemini-2.0-flash`.
 |----------|-------------|---------|
 | `LLM_BACKEND` | all | `ollama` |
 | `OLLAMA_HOST` | `LLM_BACKEND=ollama` | _(none, exits if missing)_ |
+| `OLLAMA_API_KEY` | `LLM_BACKEND=ollama_cloud` | _(none, exits if missing)_ |
+| `OLLAMA_CLOUD_HOST` | `LLM_BACKEND=ollama_cloud` | `https://ollama.com` |
+| `OLLAMA_CLOUD_MODEL` | `LLM_BACKEND=ollama_cloud` | `qwen3-coder-next:cloud` |
 | `GEMINI_API_KEY` | `LLM_BACKEND=gemini` | _(none, exits if missing)_ |
 
 ## Usage
@@ -117,15 +132,17 @@ The audit report is written to `<source>.audit.json` by default.
 ```json
 {
   "file": "vulnerable_code.c",
-  "model": "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m",
+  "model": "dagbs/deepseek-coder-v2-lite-instruct:q4_k_m",
   "mode": "function-by-function",
   "functions": [
     {
       "function": "process_input",
+      "file": "vulnerable_code.c",
       "vulnerabilities": [
         {
           "line": 42,
-          "description": "CWE-121: strcpy into fixed-size stack buffer with no bounds check"
+          "CWE_ID": "CWE-121",
+          "description": "strcpy into fixed-size stack buffer with no bounds check"
         }
       ]
     }
@@ -138,26 +155,29 @@ The audit report is written to `<source>.audit.json` by default.
 ```json
 {
   "file": "main_complex.c",
-  "model": "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m",
+  "model": "dagbs/deepseek-coder-v2-lite-instruct:q4_k_m",
   "mode": "function-by-function",
   "functions": [
     {
       "function": "main",
+      "file": "main_complex.c",
       "vulnerabilities": [...]
     }
   ],
   "cross_function": [
     {
       "functions_involved": ["delete_user", "process_user_command"],
-      "file": "main_complex.c",
-      "line": 22,
-      "description": "CWE-416: alice freed in delete_user then dereferenced in process_user_command"
+      "file": "user_manager.c",
+      "line": 36,
+      "CWE_ID": "CWE-416",
+      "description": "alice freed in delete_user then dereferenced in process_user_command"
     },
     {
       "functions_involved": ["main", "delete_user"],
-      "file": "main_complex.c",
-      "line": 26,
-      "description": "CWE-415: delete_user called twice on alice — double free"
+      "file": "user_manager.c",
+      "line": 23,
+      "CWE_ID": "CWE-415",
+      "description": "delete_user called twice on alice — double free"
     }
   ]
 }
@@ -170,12 +190,13 @@ The `cross_function` key is omitted entirely when no inter-procedural clusters e
 ```json
 {
   "file": "legacy.c",
-  "model": "dagbs/deepseek-coder-v2-lite-instruct:q3_k_m",
+  "model": "dagbs/deepseek-coder-v2-lite-instruct:q4_k_m",
   "mode": "full-file",
   "vulnerabilities": [
     {
       "line": 17,
-      "description": "CWE-134: printf called with user-controlled format string"
+      "CWE_ID": "CWE-134",
+      "description": "printf called with user-controlled format string"
     }
   ]
 }
@@ -311,8 +332,9 @@ Drives both analysis passes. After the per-function loop finishes:
 
 | Function | Role |
 |---|---|
-| `review_code()` | Logs request, dispatches to `_review_ollama()` or `_review_gemini()` |
-| `_review_ollama()` | Posts to `/api/chat`; handles timeout/connection errors |
+| `review_code()` | Logs request, dispatches to `_review_ollama()`, `_review_ollama_cloud()`, or `_review_gemini()` |
+| `_review_ollama()` | Posts to local Ollama `/api/chat` with `stream: false`; handles timeout/connection errors |
+| `_review_ollama_cloud()` | Posts to Ollama Cloud `/api/chat` with Bearer auth; same request/response format as local Ollama |
 | `_review_gemini()` | Posts to Gemini `generateContent`; handles timeout/connection errors |
 | `_parse_llm_json()` | Strips markdown fences; on `JSONDecodeError` runs `_repair_unescaped_quotes()` before giving up |
 | `_repair_unescaped_quotes()` | Single-pass scanner that escapes bare `"` inside JSON string values — fixes a common LLM formatting mistake |

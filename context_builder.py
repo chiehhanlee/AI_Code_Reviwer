@@ -125,18 +125,25 @@ SCHEMA_CROSS_FUNCTION = {
 # --- Output format instructions (semantic; schema is enforced by the API) --
 # ---------------------------------------------------------------------------
 
-OUTPUT_FORMAT_FUNCTION = (
-    "Respond with a JSON object only — no prose, no markdown fences. "
-    'Set "file" to the filename shown in the `// File:` comment at the top of the function source. '
-    "List ALL vulnerabilities found, one object per issue. "
-    'If no vulnerabilities are found, return an empty "vulnerabilities" array.'
-)
+OUTPUT_FORMAT_FUNCTION = """\
+Respond with a JSON object only — no prose, no markdown fences. Use exactly this schema:
+{
+  "function": "<name of the analyzed function>",
+  "file": "<filename from the `// File:` comment at the top of the function source>",
+  "vulnerabilities": [
+    {"line": <integer>, "CWE_ID": "CWE-NNN", "description": "<one sentence>"}
+  ]
+}
+List ALL vulnerabilities found, one object per issue. If none found, return an empty "vulnerabilities" array."""
 
-OUTPUT_FORMAT_FULL_FILE = (
-    "Respond with a JSON object only — no prose, no markdown fences. "
-    "List ALL vulnerabilities found, one object per issue. "
-    'If no vulnerabilities are found, return an empty "vulnerabilities" array.'
-)
+OUTPUT_FORMAT_FULL_FILE = """\
+Respond with a JSON object only — no prose, no markdown fences. Use exactly this schema:
+{
+  "vulnerabilities": [
+    {"line": <integer>, "CWE_ID": "CWE-NNN", "description": "<one sentence>"}
+  ]
+}
+List ALL vulnerabilities found, one object per issue. If none found, return an empty "vulnerabilities" array."""
 
 CROSS_FUNCTION_CWES = """\
 1. CWE-401: Memory Leak — memory allocated in one function never freed by any caller in this cluster.
@@ -146,7 +153,12 @@ CROSS_FUNCTION_CWES = """\
 dereferences the result without a NULL check."""
 
 OUTPUT_FORMAT_CROSS_FUNCTION = """\
-Respond with a JSON object only — no prose, no markdown fences.
+Respond with a JSON object only — no prose, no markdown fences. Use exactly this schema:
+{
+  "cross_function_vulnerabilities": [
+    {"functions_involved": ["<func1>", "<func2>"], "file": "<filename>", "line": <integer>, "CWE_ID": "CWE-NNN", "description": "<one sentence>"}
+  ]
+}
 "file" must be the filename shown in the `// File:` comment at the top of the function \
 source where the dangerous operation occurs (the dereference for CWE-416/CWE-476, \
 the second free for CWE-415, the allocation site for CWE-401).

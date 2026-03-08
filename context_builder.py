@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import json
 import re
 
@@ -400,17 +401,28 @@ def analyze_ast(code_content, filepath="<unknown>"):
 
     ast_code_stripped = '\n'.join(out)
 
-    # Inject standard types
+    # Inject standard types that pycparser doesn't know about.
+    # Note: only typedef declarations are supported; #define is not (pycparser
+    # strips preprocessor directives from user code, but not from this block).
     typedefs = """
 typedef unsigned int size_t;
-typedef void FILE;
 typedef int ssize_t;
-typedef int uint32_t;
-typedef int int32_t;
+typedef long ptrdiff_t;
+typedef long intptr_t;
+typedef unsigned long uintptr_t;
+typedef void FILE;
+typedef void * va_list;
+typedef int pid_t;
+typedef unsigned int socklen_t;
+typedef long off_t;
+typedef long time_t;
+typedef int wchar_t;
 typedef int uint8_t;
 typedef int int8_t;
 typedef int uint16_t;
 typedef int int16_t;
+typedef int uint32_t;
+typedef int int32_t;
 typedef int uint64_t;
 typedef int int64_t;
 """
@@ -493,9 +505,9 @@ def read_code_file(filepath, processed_files=None, include_dirs=()):
             content = f.read()
 
         base_dir = os.path.dirname(abs_path)
-        basename = os.path.basename(filepath)
+        relpath = os.path.relpath(abs_path)
         orig_line = 1  # tracks current line number within this file
-        merged_content = f"// --- FILE: {basename} LINE: 1 ---\n"
+        merged_content = f"// --- FILE: {relpath} LINE: 1 ---\n"
 
         for line in content.split('\n'):
             match = re.match(r'^\s*#include\s+"([^"]+)"', line)
@@ -511,8 +523,9 @@ def read_code_file(filepath, processed_files=None, include_dirs=()):
                     if c_path and c_file != os.path.basename(filepath):
                         merged_content += read_code_file(c_path, processed_files, include_dirs)
                     # Resume marker: tells the parser we're back in this file at orig_line
-                    merged_content += f"// --- FILE: {basename} LINE: {orig_line} ---\n"
+                    merged_content += f"// --- FILE: {relpath} LINE: {orig_line} ---\n"
                 else:
+                    print(f"[WARN] Cannot find include: {include_file}", file=sys.stderr)
                     merged_content += f"// [MISSING FILE] {include_file}\n"
             else:
                 merged_content += line + "\n"
@@ -645,12 +658,16 @@ def _build_cross_function_system_prompt():
 
 _ALLOC_RE = re.compile(r'\b(malloc|calloc|realloc|strdup|strndup)\s*\(')
 _FREE_RE = re.compile(r'\bfree\s*\(')
+_STRING_LITERAL_RE = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
 def _classify_function_role(source):
     """Return a short memory-role label derived from the function's source."""
-    allocs = bool(_ALLOC_RE.search(source))
-    frees = bool(_FREE_RE.search(source))
+    # Strip string literals then comments to avoid false matches inside them.
+    clean = _STRING_LITERAL_RE.sub('""', source)
+    clean = prune_context(clean)
+    allocs = bool(_ALLOC_RE.search(clean))
+    frees = bool(_FREE_RE.search(clean))
     if allocs and frees:
         return "ALLOCATES and FREES memory"
     if allocs:

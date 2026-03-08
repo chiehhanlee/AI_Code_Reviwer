@@ -27,8 +27,9 @@ def _run_verification_pass(report, functions):
           f"model: {VERIFY_MODEL_NAME})...", file=sys.stderr)
 
     system_prompt = _build_verify_system_prompt()
-    total_confirmed = 0
-    total_rejected  = 0
+    total_confirmed  = 0
+    total_rejected   = 0
+    total_unverified = 0
 
     # --- Verify per-function findings ---
     for entry in report.get("functions", []):
@@ -49,14 +50,22 @@ def _run_verification_pass(report, functions):
             for v in _parse_llm_json(raw).get("verified", [])
         }
         for vuln in vulns:
-            result = verify_map.get((vuln.get("line"), vuln.get("CWE_ID")), {})
-            vuln["confirmed"]       = result.get("confirmed", True)
-            vuln["severity"]        = result.get("severity", "")
-            vuln["exploit_example"] = result.get("exploit_example", "")
-            if result.get("confirmed", True):
-                total_confirmed += 1
+            key = (vuln.get("line"), vuln.get("CWE_ID"))
+            result = verify_map.get(key)
+            if result is None:
+                print(f"    [WARN] verifier skipped {key[1]} at line {key[0]}", file=sys.stderr)
+                vuln["confirmed"]       = None
+                vuln["severity"]        = ""
+                vuln["exploit_example"] = ""
+                total_unverified += 1
             else:
-                total_rejected += 1
+                vuln["confirmed"]       = result.get("confirmed", True)
+                vuln["severity"]        = result.get("severity", "")
+                vuln["exploit_example"] = result.get("exploit_example", "")
+                if vuln["confirmed"]:
+                    total_confirmed += 1
+                else:
+                    total_rejected += 1
 
     # --- Verify cross-function findings ---
     cf_findings = report.get("cross_function", [])
@@ -78,17 +87,25 @@ def _run_verification_pass(report, functions):
                 for v in _parse_llm_json(raw).get("verified", [])
             }
             for vuln in cf_findings:
-                result = verify_map.get((vuln.get("line"), vuln.get("CWE_ID")), {})
-                vuln["confirmed"]       = result.get("confirmed", True)
-                vuln["severity"]        = result.get("severity", "")
-                vuln["exploit_example"] = result.get("exploit_example", "")
-                if result.get("confirmed", True):
-                    total_confirmed += 1
+                key = (vuln.get("line"), vuln.get("CWE_ID"))
+                result = verify_map.get(key)
+                if result is None:
+                    print(f"    [WARN] verifier skipped {key[1]} at line {key[0]}", file=sys.stderr)
+                    vuln["confirmed"]       = None
+                    vuln["severity"]        = ""
+                    vuln["exploit_example"] = ""
+                    total_unverified += 1
                 else:
-                    total_rejected += 1
+                    vuln["confirmed"]       = result.get("confirmed", True)
+                    vuln["severity"]        = result.get("severity", "")
+                    vuln["exploit_example"] = result.get("exploit_example", "")
+                    if vuln["confirmed"]:
+                        total_confirmed += 1
+                    else:
+                        total_rejected += 1
 
     print(f"Verification complete: {total_confirmed} confirmed, "
-          f"{total_rejected} rejected.", file=sys.stderr)
+          f"{total_rejected} rejected, {total_unverified} unverified.", file=sys.stderr)
 
 
 def _deduplicate_report(report):
@@ -157,11 +174,18 @@ def main():
                         help="Additional include search path (repeatable, like gcc -I)")
     parser.add_argument("-o", "--output", dest="output", default=None, metavar="FILE",
                         help="Output JSON file (default: <source>.audit.json)")
+    parser.add_argument("--cluster-size", type=int, default=8, metavar="N",
+                        help="Max functions per cross-function cluster (default: 8)")
+    parser.add_argument("--timeout", type=int, default=None, metavar="N",
+                        help="API timeout in seconds (default: API_TIMEOUT_SECS env or 300)")
     args = parser.parse_args()
 
+    import llm_client
     filepath = args.filepath
     output_path = args.output or (os.path.splitext(filepath)[0] + ".audit.json")
     include_dirs = INCLUDE_DIRS + [os.path.abspath(d) for d in args.include_dirs]
+    if args.timeout is not None:
+        llm_client.API_TIMEOUT = args.timeout
 
     if include_dirs:
         print(f"Include search paths: {include_dirs}", file=sys.stderr)
@@ -183,9 +207,9 @@ def main():
             user_prompt = _build_user_prompt(pruned_content)
             report.update(_parse_llm_json(review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)))
         else:
-            target_basename = os.path.basename(filepath)
+            target_relpath = os.path.relpath(os.path.abspath(filepath))
             target_funcs = {n: d for n, d in functions.items()
-                            if d['file'] == target_basename}
+                            if d['file'] == target_relpath}
             total = len(target_funcs)
             print(f"Found {len(functions)} functions ({total} in target file). "
                   f"Auditing function-by-function... "
@@ -198,7 +222,7 @@ def main():
             file_sections = _extract_file_sections(code_content, file_map)
             header_context = ""
             for fname, content in file_sections.items():
-                if fname.endswith('.h') and fname != target_basename:
+                if fname.endswith('.h') and fname != target_relpath:
                     header_context += f"// --- Header: {fname} ---\n{content}\n"
 
             for idx, (func_name, data) in enumerate(target_funcs.items(), start=1):
@@ -217,7 +241,8 @@ def main():
             # --- Cross-function pass ---
             print(f"Running cross-function analysis pass... "
                   f"(backend: {ACTIVE_BACKEND}, model: {MODEL_NAME})", file=sys.stderr)
-            clusters = build_call_clusters(functions, target_funcs)
+            clusters = build_call_clusters(functions, target_funcs,
+                                           max_cluster_size=args.cluster_size)
             if clusters:
                 cross_function_results = []
                 system_prompt_cf = _build_cross_function_system_prompt()

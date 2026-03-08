@@ -10,7 +10,7 @@ import re
 import datetime
 import requests
 
-API_TIMEOUT   = 300              # seconds per request
+API_TIMEOUT = int(os.getenv("API_TIMEOUT_SECS", "300"))  # override with API_TIMEOUT_SECS env var
 LOG_FILE_PATH = "ai_request_log.jsonl"
 
 ACTIVE_BACKEND = os.getenv("LLM_BACKEND", "ollama").lower()

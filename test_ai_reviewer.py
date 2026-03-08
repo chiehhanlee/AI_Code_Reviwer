@@ -523,8 +523,11 @@ class TestGoldenSamples(unittest.TestCase):
     def compare_report_to_golden(actual, golden):
         """Compare an AI-generated report against a golden report.
 
-        Returns (missing, extra) where each is a list of
-        (function_name, line, CWE_ID) tuples.
+        Returns (missing, extra) where each is a list of finding keys.
+
+        Key shapes:
+        - Per-function:   (function_name: str, line: int, CWE_ID: str)
+        - Cross-function: (functions_involved: frozenset, CWE_ID: str)
 
         missing — findings present in golden but absent from actual
                   (false negatives: things the AI missed)
@@ -538,11 +541,14 @@ class TestGoldenSamples(unittest.TestCase):
                 for v in entry.get("vulnerabilities", []):
                     if isinstance(v, dict):
                         idx.add((fname, v.get("line"), v.get("CWE_ID")))
+            for v in report.get("cross_function", []):
+                if isinstance(v, dict):
+                    idx.add((frozenset(v.get("functions_involved", [])), v.get("CWE_ID")))
             return idx
 
         golden_idx = _index(golden)
         actual_idx = _index(actual)
-        return sorted(golden_idx - actual_idx), sorted(actual_idx - golden_idx)
+        return sorted(golden_idx - actual_idx, key=str), sorted(actual_idx - golden_idx, key=str)
 
     def test_compare_exact_match(self):
         report = {"functions": [{"function": "f", "vulnerabilities": [
@@ -582,6 +588,33 @@ class TestGoldenSamples(unittest.TestCase):
         ]}]}
         missing, extra = self.compare_report_to_golden({}, golden)
         self.assertEqual(len(missing), 1)
+        self.assertEqual(extra, [])
+
+    def test_compare_cross_function_missing(self):
+        report = {"cross_function": []}
+        golden = {"cross_function": [
+            {"functions_involved": ["foo", "bar"], "CWE_ID": "CWE-416", "line": 10}
+        ]}
+        missing, extra = self.compare_report_to_golden(report, golden)
+        self.assertIn((frozenset({"foo", "bar"}), "CWE-416"), missing)
+
+    def test_compare_cross_function_extra(self):
+        report = {"cross_function": [
+            {"functions_involved": ["foo", "bar"], "CWE_ID": "CWE-416", "line": 10}
+        ]}
+        missing, extra = self.compare_report_to_golden(report, {})
+        self.assertIn((frozenset({"foo", "bar"}), "CWE-416"), extra)
+
+    def test_compare_cross_function_order_independent(self):
+        # functions_involved order should not matter (frozenset key)
+        report = {"cross_function": [
+            {"functions_involved": ["a", "b"], "CWE_ID": "CWE-401", "line": 5}
+        ]}
+        golden = {"cross_function": [
+            {"functions_involved": ["b", "a"], "CWE_ID": "CWE-401", "line": 5}
+        ]}
+        missing, extra = self.compare_report_to_golden(report, golden)
+        self.assertEqual(missing, [])
         self.assertEqual(extra, [])
 
 

@@ -6,13 +6,17 @@ An AI-powered security vulnerability scanner for C/C++ source files. It performs
 
 - **Function-level analysis** — parses the AST to audit each function individually, reducing noise and token usage
 - **Cross-function analysis pass** — a second LLM pass groups related functions into call-clusters and looks exclusively for inter-procedural bugs (UAF, double-free, memory leaks, NULL deref across boundaries)
+- **Verification pass** — an optional third pass re-reads each finding and annotates it with `confirmed` (true/false/null), `severity`, and an `exploit_example`; unverified findings (skipped by the verifier) are flagged as `null` rather than silently assumed confirmed
 - **Header context injection** — header type/struct definitions are passed alongside each target function; callee source is excluded from pass 1 to prevent the model attributing callee bugs to the caller
 - **Cross-file call-chain clustering** — clusters include callee functions from `#include`d files, so a one-function file (e.g. `main`) still forms a cluster with the functions it calls
-- **Function role classification** — each function is auto-labelled as ALLOCATES / FREES / USES before the cross-function prompt so the model correctly attributes `functions_involved`
-- **Recursive include merging** — inlines local `#include "..."` headers and companion `.c` files before analysis
+- **Function role classification** — each function is auto-labelled as ALLOCATES / FREES / USES before the cross-function prompt so the model correctly attributes `functions_involved`; string literals and comments are stripped before the regex runs to avoid false labels
+- **Recursive include merging** — inlines local `#include "..."` headers and companion `.c` files before analysis; unresolvable includes emit a `[WARN]` to stderr so incomplete analysis is visible
+- **Full relative paths in markers** — `// --- FILE:` markers store the path relative to the working directory (not just the basename), so the correct file is attributed even when two directories contain a file with the same name
 - **Regex fallback** — falls back to brace-depth heuristics when `pycparser` cannot parse macro-heavy code
 - **Full-file fallback** — if AST extraction fails entirely, sends the minified whole file as a single request
 - **Three LLM backends** — switch between local Ollama, Ollama Cloud (ollama.com), and Google Gemini Flash via an environment variable
+- **Configurable timeouts** — `API_TIMEOUT_SECS` env var or `--timeout` CLI flag; useful when a slow local GPU needs more than the default 300 s
+- **Tunable cluster size** — `--cluster-size N` CLI flag controls the maximum number of functions per cross-function cluster (default: 8)
 - **Robust JSON repair** — fixes LLM responses that embed unescaped double-quotes inside string values before falling back to raw storage
 - **JSON audit reports** — results written to `<source>.audit.json`
 - **Request logging** — every prompt sent to the LLM is appended to `ai_request_log.jsonl`
@@ -115,6 +119,7 @@ Model used: `gemini-2.0-flash` (override with `GEMINI_MODEL`).
 | `GEMINI_API_KEY` | `LLM_BACKEND=gemini` | _(none, exits if missing)_ |
 | `OLLAMA_MODEL` | `LLM_BACKEND=ollama` | `dagbs/deepseek-coder-v2-lite-instruct:q4_k_m` |
 | `GEMINI_MODEL` | `LLM_BACKEND=gemini` | `gemini-2.0-flash` |
+| `API_TIMEOUT_SECS` | all | `300` |
 | `VERIFY_BACKEND` | verification pass | inherits `LLM_BACKEND` |
 | `VERIFY_MODEL` | verification pass | inherits analysis model |
 | `VERIFY_OLLAMA_HOST` | `VERIFY_BACKEND=ollama` | falls back to `OLLAMA_HOST` |
@@ -133,6 +138,9 @@ python ai_code_reviewer.py <path/to/file.c> -I ./include -I ../shared
 
 # Write the audit report to a specific file
 python ai_code_reviewer.py <path/to/file.c> -o report.json
+
+# Increase cluster size and timeout for a complex codebase on a slow machine
+python ai_code_reviewer.py <path/to/file.c> --cluster-size 12 --timeout 600
 ```
 
 The audit report is written to `<source>.audit.json` by default.
@@ -155,7 +163,7 @@ The audit report is written to `<source>.audit.json` by default.
           "line": 42,
           "CWE_ID": "CWE-121",
           "description": "strcpy into fixed-size stack buffer with no bounds check",
-          "confirmed": true,
+          "confirmed": true,       // false = rejected; null = verifier skipped this finding
           "severity": "high",
           "exploit_example": "Pass a string longer than 100 bytes as argv[1]; strcpy overwrites the return address on the stack."
         }
@@ -352,7 +360,7 @@ Drives both analysis passes. After the per-function loop finishes:
 | `_build_file_map()` / `_file_for_line()` | Maps merged-code line numbers back to per-file originals |
 | `_extract_file_sections()` | Splits merged content back into per-file chunks (for header context) |
 | `build_call_clusters()` | Union-Find clustering across target + callee functions; ego-neighborhood splitting for oversized clusters |
-| `_classify_function_role()` | Regex scan for `malloc`/`strdup` (ALLOCATES) and `free` (FREES) |
+| `_classify_function_role()` | Regex scan for `malloc`/`strdup` (ALLOCATES) and `free` (FREES); strips string literals and comments first to prevent false matches |
 | `_build_system_prompt()` | Per-function system prompt (focus on one function) |
 | `_build_user_prompt()` | Per-function user prompt (target source + context section) |
 | `_build_cross_function_system_prompt()` | Cross-function system prompt with CWE focus and attribution rules |
@@ -381,7 +389,7 @@ The original design only clustered functions defined in the *target file*. This 
 Early versions of the cross-function prompt produced findings with wrong `functions_involved` — e.g. blaming the allocating function for a UAF instead of the freeing function. Injecting a pre-computed Memory Role Summary (ALLOCATES / FREES / USES) as a section in the user prompt gives the model explicit context to attribute findings correctly without over-constraining what it detects.
 
 **pycparser fake typedefs**
-`pycparser` has no system headers. Common C types (`uint8_t`, `size_t`, `FILE`, `ssize_t`, etc.) are injected as `typedef int <name>` before parsing to prevent parse failures on standard code.
+`pycparser` has no system headers. A broad set of common C types (`uint8_t`, `size_t`, `FILE`, `ssize_t`, `va_list`, `pid_t`, `time_t`, `off_t`, `socklen_t`, `ptrdiff_t`, `intptr_t`, `uintptr_t`, `wchar_t`, etc.) are injected as `typedef int <name>` before parsing to prevent parse failures on standard code and reduce the frequency of the regex fallback.
 
 **Dangling-pointer safe JSON repair**
 LLMs sometimes write `"description": "strcmp with "admin_access""` — a bare `"` inside a JSON string. Rather than discarding the entire response as `{"raw": ...}`, `_repair_unescaped_quotes()` uses a single-pass character scanner: while inside a string, a `"` is treated as the closing delimiter only if the next non-space character is a JSON structural token (`,  }  ]  :`). Otherwise it is escaped in-place.

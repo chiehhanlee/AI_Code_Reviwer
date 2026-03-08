@@ -6,7 +6,7 @@ An AI-powered security vulnerability scanner for C/C++ source files. It performs
 
 - **Function-level analysis** — parses the AST to audit each function individually, reducing noise and token usage
 - **Cross-function analysis pass** — a second LLM pass groups related functions into call-clusters and looks exclusively for inter-procedural bugs (UAF, double-free, memory leaks, NULL deref across boundaries)
-- **Context injection** — callers/callees and header content are passed alongside each target function so the model can reason across call boundaries
+- **Header context injection** — header type/struct definitions are passed alongside each target function; callee source is excluded from pass 1 to prevent the model attributing callee bugs to the caller
 - **Cross-file call-chain clustering** — clusters include callee functions from `#include`d files, so a one-function file (e.g. `main`) still forms a cluster with the functions it calls
 - **Function role classification** — each function is auto-labelled as ALLOCATES / FREES / USES before the cross-function prompt so the model correctly attributes `functions_involved`
 - **Recursive include merging** — inlines local `#include "..."` headers and companion `.c` files before analysis
@@ -70,6 +70,8 @@ Select a backend with `LLM_BACKEND` (default: `ollama`).
 ```bash
 export LLM_BACKEND=ollama          # optional — ollama is the default
 export OLLAMA_HOST="http://localhost:11434"
+# Optional overrides:
+# export OLLAMA_MODEL=dagbs/deepseek-coder-v2-lite-instruct:q4_k_m  # default
 ```
 
 Pull the model if you haven't already:
@@ -78,7 +80,7 @@ Pull the model if you haven't already:
 ollama pull dagbs/deepseek-coder-v2-lite-instruct:q4_k_m
 ```
 
-Model used: `dagbs/deepseek-coder-v2-lite-instruct:q4_k_m`.
+Model used: `dagbs/deepseek-coder-v2-lite-instruct:q4_k_m` (override with `OLLAMA_MODEL`).
 
 ### Ollama Cloud backend (ollama.com)
 
@@ -95,9 +97,11 @@ export OLLAMA_API_KEY=<your-ollama.com-api-key>
 ```bash
 export LLM_BACKEND=gemini
 export GEMINI_API_KEY=<your-api-key>
+# Optional overrides:
+# export GEMINI_MODEL=gemini-2.0-flash   # default
 ```
 
-Model used: `gemini-2.0-flash`.
+Model used: `gemini-2.0-flash` (override with `GEMINI_MODEL`).
 
 ### Environment variable summary
 
@@ -109,6 +113,14 @@ Model used: `gemini-2.0-flash`.
 | `OLLAMA_CLOUD_HOST` | `LLM_BACKEND=ollama_cloud` | `https://ollama.com` |
 | `OLLAMA_CLOUD_MODEL` | `LLM_BACKEND=ollama_cloud` | `qwen3-coder-next:cloud` |
 | `GEMINI_API_KEY` | `LLM_BACKEND=gemini` | _(none, exits if missing)_ |
+| `OLLAMA_MODEL` | `LLM_BACKEND=ollama` | `dagbs/deepseek-coder-v2-lite-instruct:q4_k_m` |
+| `GEMINI_MODEL` | `LLM_BACKEND=gemini` | `gemini-2.0-flash` |
+| `VERIFY_BACKEND` | verification pass | inherits `LLM_BACKEND` |
+| `VERIFY_MODEL` | verification pass | inherits analysis model |
+| `VERIFY_OLLAMA_HOST` | `VERIFY_BACKEND=ollama` | falls back to `OLLAMA_HOST` |
+| `VERIFY_OLLAMA_API_KEY` | `VERIFY_BACKEND=ollama_cloud` | falls back to `OLLAMA_API_KEY` |
+| `VERIFY_OLLAMA_CLOUD_HOST` | `VERIFY_BACKEND=ollama_cloud` | falls back to `OLLAMA_CLOUD_HOST` |
+| `VERIFY_GEMINI_API_KEY` | `VERIFY_BACKEND=gemini` | falls back to `GEMINI_API_KEY` |
 
 ## Usage
 
@@ -142,7 +154,10 @@ The audit report is written to `<source>.audit.json` by default.
         {
           "line": 42,
           "CWE_ID": "CWE-121",
-          "description": "strcpy into fixed-size stack buffer with no bounds check"
+          "description": "strcpy into fixed-size stack buffer with no bounds check",
+          "confirmed": true,
+          "severity": "high",
+          "exploit_example": "Pass a string longer than 100 bytes as argv[1]; strcpy overwrites the return address on the stack."
         }
       ]
     }
@@ -274,7 +289,9 @@ C source file
       │  PASS 1 — Per-function analysis                     │
       │                                                     │
       │  For each function in target_funcs:                 │
-      │    • Build context: header content + callee sources │
+      │    • Build context: header content only             │
+      │      (callee sources excluded — prevents model      │
+      │       attributing callee bugs to the caller)        │
       │    • system prompt: audit THIS function only        │
       │    • user prompt:   target source + context         │
       │    • review_code() → parse → append to functions[] │
@@ -298,6 +315,19 @@ C source file
       │      (CWE-401/415/416/476), with attribution rules  │
       │    • review_code() → parse → extend cross_function[]│
       └─────────────────────────────────────────────────────┘
+             │
+             │
+             ▼
+      _deduplicate_report()   Remove duplicate (line, CWE_ID) findings
+             │
+             ▼
+      _run_verification_pass()   (only if VERIFY_BACKEND is set)
+      │  For each function entry and cross-function cluster:
+      │    • system prompt: second-opinion expert reviewer
+      │    • user prompt: function source + reported findings list
+      │    • verify_findings() → annotates each finding with:
+      │      confirmed (bool), severity, exploit_example
+      └──────────────────────────────────────────────────────
              │
              ▼
       audit report written to <source>.audit.json

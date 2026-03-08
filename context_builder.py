@@ -29,8 +29,8 @@ FOCUS_AREAS = """\
 
 CONTEXT_SECTION_TEMPLATE = """\
 ## Supporting Context
-The following functions are called by or call `{func_name}`. They are provided \
-ONLY to help you understand data flow and interactions. Do NOT report \
+The following type definitions and declarations are provided \
+ONLY to help you understand data types and interfaces. Do NOT report \
 vulnerabilities in them.
 ```c
 {context_code}
@@ -119,6 +119,29 @@ SCHEMA_CROSS_FUNCTION = {
         },
     },
     "required": ["cross_function_vulnerabilities"],
+}
+
+SCHEMA_VERIFY = {
+    "type": "object",
+    "properties": {
+        "verified": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "line":            {"type": "integer"},
+                    "CWE_ID":          {"type": "string"},
+                    "confirmed":       {"type": "boolean"},
+                    "severity":        {"type": "string",
+                                       "enum": ["critical", "high", "medium", "low"]},
+                    "exploit_example": {"type": "string"},
+                },
+                "required": ["line", "CWE_ID", "confirmed", "severity", "exploit_example"],
+            },
+            "description": "One entry per reported finding, in the same order.",
+        },
+    },
+    "required": ["verified"],
 }
 
 # ---------------------------------------------------------------------------
@@ -654,3 +677,50 @@ def _build_cross_function_user_prompt(cluster_sources):
     for fname, source in cluster_sources.items():
         parts.append(f"\n### Function: `{fname}`\n```c\n{source}\n```")
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# --- Verifier pass prompt builders -----------------------------------------
+# ---------------------------------------------------------------------------
+
+_VERIFY_OUTPUT_FORMAT = """\
+Respond with a JSON object only — no prose, no markdown fences. Use exactly this schema:
+{
+  "verified": [
+    {"line": <integer>, "CWE_ID": "CWE-NNN", "confirmed": <true|false>,
+     "severity": "critical|high|medium|low",
+     "exploit_example": "<1-3 sentences: how it is exploited if confirmed, or why it is not a real issue if false>"}
+  ]
+}
+Return one entry per reported finding, in the same order. Do not add new findings."""
+
+
+def _build_verify_system_prompt():
+    return (
+        "You are a senior C/C++ security expert performing a second-opinion review.\n\n"
+        "## Task\n"
+        "You will be given C source code and a list of reported vulnerabilities.\n"
+        "For each finding:\n"
+        "1. Set confirmed=true if it is a genuine vulnerability, false if it is a false positive.\n"
+        "2. Assign severity: critical, high, medium, or low.\n"
+        "3. Write exploit_example: if confirmed, describe concretely how an attacker could "
+        "trigger it (e.g. what input to pass, what call sequence to use). "
+        "If false positive, explain briefly why it is not exploitable.\n\n"
+        f"## Output Format\n{_VERIFY_OUTPUT_FORMAT}"
+    )
+
+
+def _build_verify_user_prompt(source, vulnerabilities):
+    """Build the verifier user prompt for per-function or cross-function findings.
+
+    source         -- source code string (single function or multi-function block)
+    vulnerabilities -- list of finding dicts with at least 'line', 'CWE_ID', 'description'
+    """
+    vuln_lines = "\n".join(
+        f"- Line {v.get('line', '?')}, {v.get('CWE_ID', '?')}: {v.get('description', '')}"
+        for v in vulnerabilities
+    )
+    return (
+        f"## Source Code\n```c\n{source}\n```\n\n"
+        f"## Reported Vulnerabilities\n{vuln_lines}\n"
+    )

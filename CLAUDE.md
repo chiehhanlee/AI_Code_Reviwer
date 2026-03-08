@@ -82,7 +82,7 @@ The virtual environment is at `./venv/` (Python 3.8.10) but has no packages inst
 
 ### Key design decisions
 
-- **Function-level analysis with context injection**: the AI sees the target function plus its callers/callees so it can reason about data flow across boundaries, but is instructed to report issues only in the target function.
+- **Function-level analysis with header context**: the AI sees the target function plus header type/struct definitions; callee source code is intentionally excluded from pass 1 to prevent the model from attributing callee vulnerabilities to the caller. Cross-function issues are handled exclusively by pass 2.
 - **`pycparser` fake typedefs**: standard C types (`uint8_t`, `size_t`, `FILE`, etc.) are injected before parsing because `pycparser` has no system headers.
 - **Full-file fallback**: when AST parsing fails entirely, `review_code()` is called on the minified whole file.
 - **Backend isolation**: each backend's init code runs only when selected, so missing credentials for unused backends do not cause errors.

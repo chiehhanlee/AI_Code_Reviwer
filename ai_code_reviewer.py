@@ -12,9 +12,140 @@ from context_builder import (
     _build_cross_function_system_prompt,
     _build_cross_function_user_prompt,
     _classify_function_role,
-    SCHEMA_FUNCTION, SCHEMA_FULL_FILE, SCHEMA_CROSS_FUNCTION,
+    _build_verify_system_prompt, _build_verify_user_prompt,
+    SCHEMA_FUNCTION, SCHEMA_FULL_FILE, SCHEMA_CROSS_FUNCTION, SCHEMA_VERIFY,
 )
-from llm_client import MODEL_NAME, review_code, _parse_llm_json
+from llm_client import ACTIVE_BACKEND, MODEL_NAME, VERIFY_BACKEND, VERIFY_MODEL_NAME, \
+    review_code, verify_findings, _parse_llm_json
+
+
+def _run_verification_pass(report, functions):
+    """Use the verifier LLM to confirm each finding and add exploit_example,
+    confirmed, and severity fields in-place.
+    Uses VERIFY_BACKEND/VERIFY_MODEL if set, otherwise inherits from LLM_BACKEND."""
+    print(f"Running verification pass (verifier: {VERIFY_BACKEND}, "
+          f"model: {VERIFY_MODEL_NAME})...", file=sys.stderr)
+
+    system_prompt = _build_verify_system_prompt()
+    total_confirmed = 0
+    total_rejected  = 0
+
+    # --- Verify per-function findings ---
+    for entry in report.get("functions", []):
+        vulns = [v for v in entry.get("vulnerabilities", []) if isinstance(v, dict)]
+        if not vulns:
+            continue
+        func_name = entry.get("function", "")
+        source    = functions.get(func_name, {}).get("source", "")
+        print(f"  Verifying: {func_name} ({len(vulns)} finding(s))", file=sys.stderr)
+
+        user_prompt = _build_verify_user_prompt(source, vulns)
+        raw = verify_findings(system_prompt, user_prompt, schema=SCHEMA_VERIFY)
+        if raw is None:
+            continue
+
+        verify_map = {
+            (v.get("line"), v.get("CWE_ID")): v
+            for v in _parse_llm_json(raw).get("verified", [])
+        }
+        for vuln in vulns:
+            result = verify_map.get((vuln.get("line"), vuln.get("CWE_ID")), {})
+            vuln["confirmed"]       = result.get("confirmed", True)
+            vuln["severity"]        = result.get("severity", "")
+            vuln["exploit_example"] = result.get("exploit_example", "")
+            if result.get("confirmed", True):
+                total_confirmed += 1
+            else:
+                total_rejected += 1
+
+    # --- Verify cross-function findings ---
+    cf_findings = report.get("cross_function", [])
+    if cf_findings:
+        # Build a combined source block from all functions involved
+        involved_names = {n for v in cf_findings for n in v.get("functions_involved", [])}
+        combined_source = "\n\n".join(
+            f"// --- Function: {n} ---\n{functions[n]['source']}"
+            for n in sorted(involved_names) if n in functions
+        )
+        print(f"  Verifying: cross-function findings ({len(cf_findings)} finding(s))",
+              file=sys.stderr)
+
+        user_prompt = _build_verify_user_prompt(combined_source, cf_findings)
+        raw = verify_findings(system_prompt, user_prompt, schema=SCHEMA_VERIFY)
+        if raw is not None:
+            verify_map = {
+                (v.get("line"), v.get("CWE_ID")): v
+                for v in _parse_llm_json(raw).get("verified", [])
+            }
+            for vuln in cf_findings:
+                result = verify_map.get((vuln.get("line"), vuln.get("CWE_ID")), {})
+                vuln["confirmed"]       = result.get("confirmed", True)
+                vuln["severity"]        = result.get("severity", "")
+                vuln["exploit_example"] = result.get("exploit_example", "")
+                if result.get("confirmed", True):
+                    total_confirmed += 1
+                else:
+                    total_rejected += 1
+
+    print(f"Verification complete: {total_confirmed} confirmed, "
+          f"{total_rejected} rejected.", file=sys.stderr)
+
+
+def _deduplicate_report(report):
+    """
+    Remove duplicate vulnerability findings from the report in-place.
+
+    Deduplication keys:
+    - per-function vulnerabilities:  (line, CWE_ID) within each function entry
+    - cross_function findings:       (frozenset(functions_involved), CWE_ID)
+    - full-file vulnerabilities:     (line, CWE_ID)
+    """
+    removed = 0
+
+    # Per-function pass
+    for entry in report.get("functions", []):
+        vulns = entry.get("vulnerabilities", [])
+        seen = set()
+        deduped = []
+        for v in vulns:
+            key = (v.get("line"), v.get("CWE_ID"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(v)
+            else:
+                removed += 1
+        entry["vulnerabilities"] = deduped
+
+    # Cross-function pass
+    cf = report.get("cross_function", [])
+    if cf:
+        seen = set()
+        deduped = []
+        for v in cf:
+            key = (frozenset(v.get("functions_involved", [])), v.get("CWE_ID"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(v)
+            else:
+                removed += 1
+        report["cross_function"] = deduped
+
+    # Full-file fallback
+    vulns = report.get("vulnerabilities", [])
+    if vulns:
+        seen = set()
+        deduped = []
+        for v in vulns:
+            key = (v.get("line"), v.get("CWE_ID"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(v)
+            else:
+                removed += 1
+        report["vulnerabilities"] = deduped
+
+    if removed:
+        print(f"Deduplication removed {removed} duplicate finding(s).", file=sys.stderr)
 
 
 def main():
@@ -38,10 +169,11 @@ def main():
 
     code_content = read_code_file(filepath, include_dirs=include_dirs)
     report = {"file": filepath, "model": MODEL_NAME}
+    functions = {}   # populated during AST path; used by verification pass
 
     if HAS_PYCPARSER:
         print("Extracting AST and function dependencies...", file=sys.stderr)
-        functions = analyze_ast(code_content, filepath)
+        functions = analyze_ast(code_content, filepath)  # noqa: F841 (used by verify pass)
 
         if not functions:
             print("Failed to build AST. Falling back to full file review...", file=sys.stderr)
@@ -56,7 +188,8 @@ def main():
                             if d['file'] == target_basename}
             total = len(target_funcs)
             print(f"Found {len(functions)} functions ({total} in target file). "
-                  f"Auditing function-by-function...", file=sys.stderr)
+                  f"Auditing function-by-function... "
+                  f"(backend: {ACTIVE_BACKEND}, model: {MODEL_NAME})", file=sys.stderr)
             report["mode"] = "function-by-function"
             report["functions"] = []
 
@@ -73,11 +206,6 @@ def main():
                 print(f"[{idx}/{total}] ({pct}%) Auditing: {func_name}", file=sys.stderr)
 
                 context_code = header_context
-                dependencies = [c for c in data['calls'] if c in functions and c != func_name]
-                if dependencies:
-                    for dep in dependencies:
-                        context_code += f"// --- Context Function: {dep} ---\n"
-                        context_code += functions[dep]['source'] + "\n"
 
                 system_prompt = _build_system_prompt(func_name=func_name)
                 user_prompt = _build_user_prompt(data['source'], func_name=func_name,
@@ -87,7 +215,8 @@ def main():
                 report["functions"].append(entry)
 
             # --- Cross-function pass ---
-            print("Running cross-function analysis pass...", file=sys.stderr)
+            print(f"Running cross-function analysis pass... "
+                  f"(backend: {ACTIVE_BACKEND}, model: {MODEL_NAME})", file=sys.stderr)
             clusters = build_call_clusters(functions, target_funcs)
             if clusters:
                 cross_function_results = []
@@ -140,6 +269,9 @@ def main():
         system_prompt = _build_system_prompt()
         user_prompt = _build_user_prompt(pruned_content)
         report.update(_parse_llm_json(review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)))
+
+    _deduplicate_report(report)
+    _run_verification_pass(report, functions)
 
     with open(output_path, 'w') as f:
         json.dump(report, f, indent=2)

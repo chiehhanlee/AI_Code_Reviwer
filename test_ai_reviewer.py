@@ -33,7 +33,7 @@ class TestContextBuilder(unittest.TestCase):
     def test_build_system_prompt_full_file(self):
         prompt = context_builder._build_system_prompt()
         self.assertIn("security vulnerabilities", prompt)
-        self.assertIn("Buffer overflows", prompt)
+        self.assertIn("CWE-121", prompt)
 
     def test_build_system_prompt_function(self):
         prompt = context_builder._build_system_prompt(func_name="my_func")
@@ -172,6 +172,7 @@ class TestCrossFunctionPass(unittest.TestCase):
              patch('ai_code_reviewer._build_file_map', return_value=[]), \
              patch('ai_code_reviewer._extract_file_sections', return_value={}), \
              patch('ai_code_reviewer.review_code', side_effect=review_side_effect), \
+             patch('ai_code_reviewer._run_verification_pass'), \
              patch('builtins.open', mock_open()), \
              patch('json.dump', side_effect=capture_dump):
             ai_code_reviewer.main()
@@ -179,7 +180,11 @@ class TestCrossFunctionPass(unittest.TestCase):
         return report_holder
 
     def test_cross_function_key_populated(self):
-        funcs = self._make_functions({'foo': ['bar'], 'bar': []})
+        # Functions need malloc/free in their source to pass the alloc/free filter
+        funcs = {
+            'foo': {'calls': ['bar'], 'source': 'void *foo() { return malloc(4); }', 'file': 'test.c'},
+            'bar': {'calls': [], 'source': 'void bar(void *p) { free(p); }', 'file': 'test.c'},
+        }
         cf_json = ('{"cross_function_vulnerabilities": [{'
                    '"functions_involved": ["foo", "bar"], '
                    '"line": 10, "description": "CWE-416: UAF"}]}')
@@ -215,12 +220,17 @@ class TestCrossFunctionPass(unittest.TestCase):
         funcs = self._make_functions({'foo': ['bar'], 'bar': []})
         call_func_names = []
 
-        def mock_review(system_prompt, user_prompt, func_name=None):
+        def mock_review(system_prompt, user_prompt, func_name=None, **kwargs):
             call_func_names.append(func_name)
             if func_name and func_name.startswith('__cross_function_cluster_'):
                 return '{"cross_function_vulnerabilities": []}'
             return f'{{"function": "{func_name}", "vulnerabilities": []}}'
 
+        # Give functions malloc/free source so they pass the alloc/free filter
+        funcs = {
+            'foo': {'calls': ['bar'], 'source': 'void *foo() { return malloc(4); }', 'file': 'test.c'},
+            'bar': {'calls': [], 'source': 'void bar(void *p) { free(p); }', 'file': 'test.c'},
+        }
         with patch('sys.argv', ['prog', 'test.c']), \
              patch('ai_code_reviewer.HAS_PYCPARSER', True), \
              patch('ai_code_reviewer.read_code_file', return_value=''), \
@@ -228,6 +238,7 @@ class TestCrossFunctionPass(unittest.TestCase):
              patch('ai_code_reviewer._build_file_map', return_value=[]), \
              patch('ai_code_reviewer._extract_file_sections', return_value={}), \
              patch('ai_code_reviewer.review_code', side_effect=mock_review), \
+             patch('ai_code_reviewer._run_verification_pass'), \
              patch('builtins.open', mock_open()), \
              patch('json.dump', lambda *a, **k: None):
             ai_code_reviewer.main()
@@ -357,6 +368,221 @@ class TestLLMClient(unittest.TestCase):
         result = llm_client._parse_llm_json("not valid json")
         self.assertIn("raw", result)
         self.assertEqual(result["raw"], "not valid json")
+
+
+class TestDeduplicateReport(unittest.TestCase):
+
+    def test_dedup_per_function_removes_duplicate(self):
+        report = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121", "description": "first"},
+            {"line": 1, "CWE_ID": "CWE-121", "description": "duplicate"},
+        ]}]}
+        ai_code_reviewer._deduplicate_report(report)
+        self.assertEqual(len(report["functions"][0]["vulnerabilities"]), 1)
+        self.assertEqual(report["functions"][0]["vulnerabilities"][0]["description"], "first")
+
+    def test_dedup_per_function_keeps_different_cwe(self):
+        report = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121", "description": "a"},
+            {"line": 1, "CWE_ID": "CWE-122", "description": "b"},
+        ]}]}
+        ai_code_reviewer._deduplicate_report(report)
+        self.assertEqual(len(report["functions"][0]["vulnerabilities"]), 2)
+
+    def test_dedup_per_function_keeps_different_lines(self):
+        report = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121", "description": "a"},
+            {"line": 2, "CWE_ID": "CWE-121", "description": "b"},
+        ]}]}
+        ai_code_reviewer._deduplicate_report(report)
+        self.assertEqual(len(report["functions"][0]["vulnerabilities"]), 2)
+
+    def test_dedup_cross_function_removes_duplicate(self):
+        report = {"cross_function": [
+            {"functions_involved": ["a", "b"], "CWE_ID": "CWE-416", "line": 5},
+            {"functions_involved": ["b", "a"], "CWE_ID": "CWE-416", "line": 5},
+        ]}
+        ai_code_reviewer._deduplicate_report(report)
+        self.assertEqual(len(report["cross_function"]), 1)
+
+    def test_dedup_cross_function_keeps_different_cwe(self):
+        report = {"cross_function": [
+            {"functions_involved": ["a", "b"], "CWE_ID": "CWE-416", "line": 5},
+            {"functions_involved": ["a", "b"], "CWE_ID": "CWE-401", "line": 5},
+        ]}
+        ai_code_reviewer._deduplicate_report(report)
+        self.assertEqual(len(report["cross_function"]), 2)
+
+    def test_dedup_full_file_removes_duplicate(self):
+        report = {"vulnerabilities": [
+            {"line": 10, "CWE_ID": "CWE-134", "description": "first"},
+            {"line": 10, "CWE_ID": "CWE-134", "description": "dup"},
+        ]}
+        ai_code_reviewer._deduplicate_report(report)
+        self.assertEqual(len(report["vulnerabilities"]), 1)
+
+    def test_dedup_empty_report_does_not_crash(self):
+        ai_code_reviewer._deduplicate_report({})
+        ai_code_reviewer._deduplicate_report({"functions": []})
+
+
+class TestGoldenSamples(unittest.TestCase):
+    """Validate golden sample files and provide a comparison utility."""
+
+    GOLDEN_FILES = [
+        "sample/easy_sample_1/vulnerable_code.golden.json",
+        "sample/easy_sample_2/user_manager.golden.json",
+        "sample/easy_sample_2/main_complex.golden.json",
+        "sample/medium_sample_1/network_parser.golden.json",
+        "sample/medium_sample_2/session_mgr.golden.json",
+        "sample/medium_sample_3/config_reader.golden.json",
+    ]
+
+    SAMPLE_FUNCTIONS = {
+        "sample/medium_sample_1/network_parser.c": {
+            "alloc_field_value", "fill_field", "parse_tlv",
+            "summarize_packet", "process_packet",
+        },
+        "sample/medium_sample_2/session_mgr.c": {
+            "session_create", "session_authenticate", "session_free",
+            "session_get_user", "session_logout", "admin_action",
+        },
+        "sample/medium_sample_3/config_reader.c": {
+            "log_error", "read_line", "parse_config_line",
+            "read_config", "apply_config",
+        },
+    }
+
+    def test_golden_files_valid_json(self):
+        for path in self.GOLDEN_FILES:
+            with self.subTest(path=path):
+                with open(path) as f:
+                    data = json.load(f)
+                self.assertIn("model", data)
+                self.assertEqual(data["model"], "golden")
+                self.assertIn("mode", data)
+                self.assertIn("functions", data)
+
+    def test_golden_files_function_structure(self):
+        for path in self.GOLDEN_FILES:
+            with self.subTest(path=path):
+                with open(path) as f:
+                    data = json.load(f)
+                for func in data["functions"]:
+                    self.assertIn("function", func)
+                    self.assertIn("vulnerabilities", func)
+                    self.assertIsInstance(func["vulnerabilities"], list)
+                    for v in func["vulnerabilities"]:
+                        self.assertIn("line", v, f"{func['function']}: missing 'line'")
+                        self.assertIn("CWE_ID", v, f"{func['function']}: missing 'CWE_ID'")
+                        self.assertIn("description", v, f"{func['function']}: missing 'description'")
+                        self.assertRegex(v["CWE_ID"], r"^CWE-\d+$")
+
+    def test_golden_cross_function_structure(self):
+        for path in self.GOLDEN_FILES:
+            with self.subTest(path=path):
+                with open(path) as f:
+                    data = json.load(f)
+                for v in data.get("cross_function", []):
+                    self.assertIn("functions_involved", v)
+                    self.assertIsInstance(v["functions_involved"], list)
+                    self.assertGreater(len(v["functions_involved"]), 1)
+                    self.assertIn("CWE_ID", v)
+                    self.assertIn("line", v)
+                    self.assertIn("description", v)
+
+    def test_medium_samples_have_expected_functions(self):
+        for path, expected_funcs in self.SAMPLE_FUNCTIONS.items():
+            with self.subTest(path=path):
+                basename = os.path.basename(path).replace(".c", "")
+                golden_path = os.path.join(os.path.dirname(path), basename + ".golden.json")
+                with open(golden_path) as f:
+                    data = json.load(f)
+                actual_funcs = {e["function"] for e in data["functions"]}
+                self.assertEqual(actual_funcs, expected_funcs)
+
+    def test_ast_extracts_medium_sample_functions(self):
+        """Verify pycparser correctly finds all expected functions in each sample."""
+        try:
+            import pycparser  # noqa: F401
+        except ImportError:
+            self.skipTest("pycparser not installed")
+
+        for path, expected_funcs in self.SAMPLE_FUNCTIONS.items():
+            with self.subTest(path=path):
+                code = context_builder.read_code_file(path)
+                funcs = context_builder.analyze_ast(code, path)
+                self.assertEqual(set(funcs.keys()), expected_funcs,
+                                 f"AST function mismatch for {path}")
+
+    # ------------------------------------------------------------------
+    # Comparison utility — used for integration testing against golden
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compare_report_to_golden(actual, golden):
+        """Compare an AI-generated report against a golden report.
+
+        Returns (missing, extra) where each is a list of
+        (function_name, line, CWE_ID) tuples.
+
+        missing — findings present in golden but absent from actual
+                  (false negatives: things the AI missed)
+        extra   — findings present in actual but absent from golden
+                  (false positives: things the AI over-reported)
+        """
+        def _index(report):
+            idx = set()
+            for entry in report.get("functions", []):
+                fname = entry["function"]
+                for v in entry.get("vulnerabilities", []):
+                    if isinstance(v, dict):
+                        idx.add((fname, v.get("line"), v.get("CWE_ID")))
+            return idx
+
+        golden_idx = _index(golden)
+        actual_idx = _index(actual)
+        return sorted(golden_idx - actual_idx), sorted(actual_idx - golden_idx)
+
+    def test_compare_exact_match(self):
+        report = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121"}
+        ]}]}
+        golden = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121"}
+        ]}]}
+        missing, extra = self.compare_report_to_golden(report, golden)
+        self.assertEqual(missing, [])
+        self.assertEqual(extra, [])
+
+    def test_compare_missing_finding(self):
+        report = {"functions": [{"function": "f", "vulnerabilities": []}]}
+        golden = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121"}
+        ]}]}
+        missing, extra = self.compare_report_to_golden(report, golden)
+        self.assertIn(("f", 1, "CWE-121"), missing)
+        self.assertEqual(extra, [])
+
+    def test_compare_extra_finding(self):
+        report = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121"},
+            {"line": 5, "CWE_ID": "CWE-122"},
+        ]}]}
+        golden = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121"}
+        ]}]}
+        missing, extra = self.compare_report_to_golden(report, golden)
+        self.assertEqual(missing, [])
+        self.assertIn(("f", 5, "CWE-122"), extra)
+
+    def test_compare_empty_report(self):
+        golden = {"functions": [{"function": "f", "vulnerabilities": [
+            {"line": 1, "CWE_ID": "CWE-121"}
+        ]}]}
+        missing, extra = self.compare_report_to_golden({}, golden)
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(extra, [])
 
 
 if __name__ == '__main__':

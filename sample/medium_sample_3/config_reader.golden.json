@@ -1,0 +1,77 @@
+{
+  "file": "sample/medium_sample_3/config_reader.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "log_error",
+      "file": "config_reader.c",
+      "vulnerabilities": [
+        {
+          "line": 16,
+          "CWE_ID": "CWE-134",
+          "description": "msg is passed directly as the format string argument to printf; if msg contains format specifiers (e.g. %n, %x), an attacker who controls the message can read or corrupt memory."
+        }
+      ]
+    },
+    {
+      "function": "read_line",
+      "file": "config_reader.c",
+      "vulnerabilities": [
+        {
+          "line": 23,
+          "CWE_ID": "CWE-676",
+          "description": "gets() is an inherently dangerous function with no bounds checking; it writes as many bytes as the user supplies into buf regardless of its size."
+        },
+        {
+          "line": 23,
+          "CWE_ID": "CWE-121",
+          "description": "Because gets() performs no bounds checking, input longer than the caller-supplied buf causes a stack-based buffer overflow, overwriting adjacent stack frames and the return address."
+        }
+      ]
+    },
+    {
+      "function": "parse_config_line",
+      "file": "config_reader.c",
+      "vulnerabilities": [
+        {
+          "line": 30,
+          "CWE_ID": "CWE-120",
+          "description": "strcpy(tmp, line) has no size check; if line is LINE_SIZE (256) bytes or longer, it overflows the fixed-size tmp[LINE_SIZE] stack buffer."
+        },
+        {
+          "line": 34,
+          "CWE_ID": "CWE-134",
+          "description": "log_error(line) passes the raw line from the config file as the format string to printf inside log_error; a config file line containing format specifiers enables format string exploitation."
+        }
+      ]
+    },
+    {
+      "function": "read_config",
+      "file": "config_reader.c",
+      "vulnerabilities": [
+        {
+          "line": 48,
+          "CWE_ID": "CWE-134",
+          "description": "log_error(path) passes the user-supplied file path as the format string; a crafted path containing format specifiers (e.g. %n) will be interpreted by printf inside log_error."
+        },
+        {
+          "line": 52,
+          "CWE_ID": "CWE-476",
+          "description": "malloc can return NULL; entries is used on the very next line (*count = 0 writes through entries) without a NULL check, causing a NULL pointer dereference on allocation failure."
+        }
+      ]
+    },
+    {
+      "function": "apply_config",
+      "file": "config_reader.c",
+      "vulnerabilities": [
+        {
+          "line": 69,
+          "CWE_ID": "CWE-20",
+          "description": "entries[i].value is user-controlled data read from a config file and passed directly to system(); an attacker who can write the config file can execute arbitrary OS commands."
+        }
+      ]
+    }
+  ]
+}

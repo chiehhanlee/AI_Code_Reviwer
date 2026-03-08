@@ -1,0 +1,93 @@
+{
+  "file": "sample/medium_sample_1/network_parser.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "alloc_field_value",
+      "file": "network_parser.c",
+      "vulnerabilities": [
+        {
+          "line": 27,
+          "CWE_ID": "CWE-190",
+          "description": "uint16_t alloc_size = length * 2 overflows when length >= 32768, wrapping to a small value and causing malloc to allocate far less memory than the caller expects."
+        }
+      ]
+    },
+    {
+      "function": "fill_field",
+      "file": "network_parser.c",
+      "vulnerabilities": [
+        {
+          "line": 35,
+          "CWE_ID": "CWE-787",
+          "description": "memcpy writes length*2 bytes into field->value; when alloc_field_value's integer overflow produced a smaller-than-expected buffer, this writes far past the allocation boundary."
+        }
+      ]
+    },
+    {
+      "function": "parse_tlv",
+      "file": "network_parser.c",
+      "vulnerabilities": [
+        {
+          "line": 45,
+          "CWE_ID": "CWE-125",
+          "description": "out->length is read from the packet without verifying that buf_len >= 4 + out->length; the subsequent fill_field call reads past the end of the supplied buffer."
+        },
+        {
+          "line": 47,
+          "CWE_ID": "CWE-476",
+          "description": "alloc_field_value can return NULL on malloc failure; the return value is stored in out->value and immediately passed to fill_field without a NULL check, causing a NULL pointer dereference."
+        }
+      ]
+    },
+    {
+      "function": "summarize_packet",
+      "file": "network_parser.c",
+      "vulnerabilities": [
+        {
+          "line": 57,
+          "CWE_ID": "CWE-134",
+          "description": "pkt->fields[i].value is attacker-controlled data from the network packet and is passed directly as the format string to snprintf, enabling format string injection."
+        },
+        {
+          "line": 59,
+          "CWE_ID": "CWE-787",
+          "description": "offset is incremented without being checked against out_len; repeated field summaries can push offset past the end of out, causing an out-of-bounds write."
+        }
+      ]
+    },
+    {
+      "function": "process_packet",
+      "file": "network_parser.c",
+      "vulnerabilities": [
+        {
+          "line": 71,
+          "CWE_ID": "CWE-476",
+          "description": "malloc(sizeof(Packet)) can return NULL; pkt is dereferenced on the very next line without any NULL check, causing a NULL pointer dereference crash."
+        },
+        {
+          "line": 82,
+          "CWE_ID": "CWE-401",
+          "description": "When parse_tlv returns -1 mid-loop, the field->value buffers already allocated for fields 0..i-1 are leaked; only pkt itself is freed before returning NULL."
+        }
+      ]
+    }
+  ],
+  "cross_function": [
+    {
+      "functions_involved": ["alloc_field_value", "fill_field", "parse_tlv"],
+      "file": "network_parser.c",
+      "line": 27,
+      "CWE_ID": "CWE-787",
+      "description": "alloc_field_value produces an undersized buffer due to integer overflow; parse_tlv passes the result directly to fill_field, which writes length*2 bytes and overflows the too-small allocation."
+    },
+    {
+      "functions_involved": ["process_packet", "parse_tlv", "alloc_field_value"],
+      "file": "network_parser.c",
+      "line": 82,
+      "CWE_ID": "CWE-401",
+      "description": "alloc_field_value allocates field->value inside parse_tlv for each TLV field; when parse_tlv later returns -1, process_packet frees only pkt and returns NULL, leaking all previously allocated field->value buffers."
+    }
+  ]
+}

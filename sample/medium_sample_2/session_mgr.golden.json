@@ -1,0 +1,88 @@
+{
+  "file": "sample/medium_sample_2/session_mgr.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "session_create",
+      "file": "session_mgr.c",
+      "vulnerabilities": [
+        {
+          "line": 17,
+          "CWE_ID": "CWE-476",
+          "description": "strdup(username) can return NULL on heap allocation failure; the return value is stored in s->username without a NULL check, leaving a NULL pointer that will be dereferenced on later access."
+        }
+      ]
+    },
+    {
+      "function": "session_authenticate",
+      "file": "session_mgr.c",
+      "vulnerabilities": [
+        {
+          "line": 29,
+          "CWE_ID": "CWE-121",
+          "description": "strncpy copies exactly strlen(token) bytes with no room for a NUL terminator; when strlen(token) == 32 the token field is left unterminated, corrupting adjacent memory on subsequent string operations."
+        }
+      ]
+    },
+    {
+      "function": "session_free",
+      "file": "session_mgr.c",
+      "vulnerabilities": [
+        {
+          "line": 38,
+          "CWE_ID": "CWE-416",
+          "description": "session_free frees the Session and its username but does not require the caller to NULL the pointer; any caller that retains the pointer after this call holds a dangling pointer enabling use-after-free."
+        }
+      ]
+    },
+    {
+      "function": "session_get_user",
+      "file": "session_mgr.c",
+      "vulnerabilities": [
+        {
+          "line": 45,
+          "CWE_ID": "CWE-476",
+          "description": "s is dereferenced without a NULL check; if the caller passed a freed (non-NULL but dangling) pointer, this constitutes a use-after-free, and a NULL pointer would cause an immediate crash."
+        }
+      ]
+    },
+    {
+      "function": "session_logout",
+      "file": "session_mgr.c",
+      "vulnerabilities": []
+    },
+    {
+      "function": "admin_action",
+      "file": "session_mgr.c",
+      "vulnerabilities": [
+        {
+          "line": 61,
+          "CWE_ID": "CWE-416",
+          "description": "session_logout(s) frees s via session_free but does not NULL the caller's pointer; the immediate call to session_get_user(s) on the same line reads from the freed Session object, a use-after-free."
+        },
+        {
+          "line": 63,
+          "CWE_ID": "CWE-401",
+          "description": "When command is not \"logout\", admin_action returns without freeing the Session pointed to by s, leaking the entire Session allocation including the heap-allocated username."
+        }
+      ]
+    }
+  ],
+  "cross_function": [
+    {
+      "functions_involved": ["session_logout", "session_free", "admin_action"],
+      "file": "session_mgr.c",
+      "line": 61,
+      "CWE_ID": "CWE-416",
+      "description": "admin_action calls session_logout which calls session_free(s), freeing the Session; admin_action then immediately passes the now-freed s pointer to session_get_user, reading from deallocated memory."
+    },
+    {
+      "functions_involved": ["session_create", "admin_action"],
+      "file": "session_mgr.c",
+      "line": 63,
+      "CWE_ID": "CWE-401",
+      "description": "session_create allocates the Session and its username; when admin_action is called with any command other than \"logout\", neither admin_action nor any callee frees the Session, permanently leaking it."
+    }
+  ]
+}

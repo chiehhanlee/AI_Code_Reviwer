@@ -7,10 +7,13 @@ sys.modules["OpenSSL"] = None
 import os
 import json
 import re
+import time
 import datetime
 import requests
 
-API_TIMEOUT = int(os.getenv("API_TIMEOUT_SECS", "300"))  # override with API_TIMEOUT_SECS env var
+API_TIMEOUT      = int(os.getenv("API_TIMEOUT_SECS",  "300"))  # override with API_TIMEOUT_SECS env var
+MAX_RETRIES      = int(os.getenv("LLM_MAX_RETRIES",   "2"))
+RETRY_DELAY_SECS = int(os.getenv("LLM_RETRY_DELAY",   "5"))
 LOG_FILE_PATH = "ai_request_log.jsonl"
 
 ACTIVE_BACKEND = os.getenv("LLM_BACKEND", "ollama").lower()
@@ -141,11 +144,20 @@ def review_code(system_prompt, user_prompt, func_name=None, schema=None):
     with open(LOG_FILE_PATH, "a") as log_file:
         log_file.write(json.dumps(log_entry) + "\n")
 
-    if ACTIVE_BACKEND == "gemini":
-        return _review_gemini(system_prompt, user_prompt, schema=schema)
-    if ACTIVE_BACKEND == "ollama_cloud":
-        return _review_ollama_cloud(system_prompt, user_prompt, schema=schema)
-    return _review_ollama(system_prompt, user_prompt, schema=schema)
+    for attempt in range(MAX_RETRIES + 1):
+        if ACTIVE_BACKEND == "gemini":
+            result = _review_gemini(system_prompt, user_prompt, schema=schema)
+        elif ACTIVE_BACKEND == "ollama_cloud":
+            result = _review_ollama_cloud(system_prompt, user_prompt, schema=schema)
+        else:
+            result = _review_ollama(system_prompt, user_prompt, schema=schema)
+        if not _is_retryable(result):
+            return result
+        if attempt < MAX_RETRIES:
+            print(f"  [RETRY {attempt + 1}/{MAX_RETRIES}] "
+                  f"{func_name or '(unknown)'}: {result[:80]}", file=sys.stderr)
+            time.sleep(RETRY_DELAY_SECS)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -203,16 +215,43 @@ def verify_findings(system_prompt, user_prompt, schema=None):
     with open(LOG_FILE_PATH, "a") as log_file:
         log_file.write(json.dumps(log_entry) + "\n")
 
-    if VERIFY_BACKEND == "ollama":
-        return _review_ollama(system_prompt, user_prompt, schema=schema,
-                              url=_verify_cfg.get("url"), model=_verify_cfg.get("model"))
-    if VERIFY_BACKEND == "ollama_cloud":
-        return _review_ollama_cloud(system_prompt, user_prompt, schema=schema,
-                                    url=_verify_cfg.get("url"), key=_verify_cfg.get("key"),
-                                    model=_verify_cfg.get("model"))
-    # gemini
-    return _review_gemini(system_prompt, user_prompt, schema=schema,
-                          key=_verify_cfg.get("key"), model=_verify_cfg.get("model"))
+    for attempt in range(MAX_RETRIES + 1):
+        if VERIFY_BACKEND == "ollama":
+            result = _review_ollama(system_prompt, user_prompt, schema=schema,
+                                    url=_verify_cfg.get("url"), model=_verify_cfg.get("model"))
+        elif VERIFY_BACKEND == "ollama_cloud":
+            result = _review_ollama_cloud(system_prompt, user_prompt, schema=schema,
+                                          url=_verify_cfg.get("url"),
+                                          key=_verify_cfg.get("key"),
+                                          model=_verify_cfg.get("model"))
+        else:
+            result = _review_gemini(system_prompt, user_prompt, schema=schema,
+                                    key=_verify_cfg.get("key"), model=_verify_cfg.get("model"))
+        if not _is_retryable(result):
+            return result
+        if attempt < MAX_RETRIES:
+            print(f"  [RETRY {attempt + 1}/{MAX_RETRIES}] __verify__: {result[:80]}",
+                  file=sys.stderr)
+            time.sleep(RETRY_DELAY_SECS)
+    return result
+
+
+def is_error_response(text):
+    """Return True if text is an LLM backend error string, not a model response."""
+    if not isinstance(text, str):
+        return False
+    return text.startswith("Error:") or text.startswith("API Error")
+
+
+def _is_retryable(text):
+    """Return True for transient failures worth retrying (timeouts and 5xx errors)."""
+    if not isinstance(text, str):
+        return False
+    if "timed out" in text:
+        return True
+    return text.startswith("API Error") and any(
+        text.startswith(f"API Error {code}") for code in ("500", "502", "503", "504")
+    )
 
 
 def _repair_unescaped_quotes(text):

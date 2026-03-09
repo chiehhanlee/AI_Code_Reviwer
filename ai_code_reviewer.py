@@ -16,7 +16,7 @@ from context_builder import (
     SCHEMA_FUNCTION, SCHEMA_FULL_FILE, SCHEMA_CROSS_FUNCTION, SCHEMA_VERIFY,
 )
 from llm_client import ACTIVE_BACKEND, MODEL_NAME, VERIFY_BACKEND, VERIFY_MODEL_NAME, \
-    review_code, verify_findings, _parse_llm_json
+    review_code, verify_findings, _parse_llm_json, is_error_response
 
 
 def _run_verification_pass(report, functions):
@@ -205,7 +205,12 @@ def main():
             report["mode"] = "full-file"
             system_prompt = _build_system_prompt()
             user_prompt = _build_user_prompt(pruned_content)
-            report.update(_parse_llm_json(review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)))
+            raw = review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)
+            if is_error_response(raw):
+                print(f"[ERROR] Full-file analysis failed: {raw}", file=sys.stderr)
+                report["error"] = raw
+            else:
+                report.update(_parse_llm_json(raw))
         else:
             target_relpath = os.path.relpath(os.path.abspath(filepath))
             target_funcs = {n: d for n, d in functions.items()
@@ -235,6 +240,11 @@ def main():
                 user_prompt = _build_user_prompt(data['source'], func_name=func_name,
                                                  context_code=context_code)
                 raw = review_code(system_prompt, user_prompt, func_name=func_name, schema=SCHEMA_FUNCTION)
+                if is_error_response(raw):
+                    print(f"[ERROR] {func_name}: {raw}", file=sys.stderr)
+                    report["functions"].append(
+                        {"function": func_name, "vulnerabilities": [], "error": raw})
+                    continue
                 entry = _parse_llm_json(raw)
                 report["functions"].append(entry)
 
@@ -281,6 +291,9 @@ def main():
                         func_name=f"__cross_function_cluster_{cluster_idx}",
                         schema=SCHEMA_CROSS_FUNCTION,
                     )
+                    if is_error_response(raw_cf):
+                        print(f"[ERROR] cluster {cluster_idx}: {raw_cf}", file=sys.stderr)
+                        continue
                     parsed_cf = _parse_llm_json(raw_cf)
                     findings = parsed_cf.get("cross_function_vulnerabilities", [])
                     if findings:
@@ -293,7 +306,12 @@ def main():
         report["mode"] = "full-file"
         system_prompt = _build_system_prompt()
         user_prompt = _build_user_prompt(pruned_content)
-        report.update(_parse_llm_json(review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)))
+        raw = review_code(system_prompt, user_prompt, schema=SCHEMA_FULL_FILE)
+        if is_error_response(raw):
+            print(f"[ERROR] Full-file analysis failed: {raw}", file=sys.stderr)
+            report["error"] = raw
+        else:
+            report.update(_parse_llm_json(raw))
 
     _deduplicate_report(report)
     _run_verification_pass(report, functions)

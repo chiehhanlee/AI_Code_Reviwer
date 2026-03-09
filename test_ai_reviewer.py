@@ -146,6 +146,46 @@ class TestContextBuilder(unittest.TestCase):
         self.assertIn('void bar() {}', prompt)
 
 
+class TestClassifyFunctionRole(unittest.TestCase):
+
+    def test_malloc_only(self):
+        src = "void *f() { return malloc(4); }"
+        self.assertIn("ALLOCATES", context_builder._classify_function_role(src))
+
+    def test_free_only(self):
+        src = "void f(void *p) { free(p); }"
+        self.assertIn("FREES", context_builder._classify_function_role(src))
+
+    def test_both_alloc_and_free(self):
+        src = "void *f() { void *p = malloc(4); free(p); return NULL; }"
+        role = context_builder._classify_function_role(src)
+        self.assertIn("ALLOCATES", role)
+        self.assertIn("FREES", role)
+
+    def test_no_alloc_no_free(self):
+        src = "int f(int x) { return x + 1; }"
+        role = context_builder._classify_function_role(src)
+        self.assertIn("USES", role)
+
+    def test_malloc_in_string_literal_ignored(self):
+        src = 'void f() { puts("malloc(4)"); }'
+        role = context_builder._classify_function_role(src)
+        self.assertNotIn("ALLOCATES", role)
+
+    def test_free_in_line_comment_ignored(self):
+        src = "void f() { // free(p);\n}"
+        role = context_builder._classify_function_role(src)
+        self.assertNotIn("FREES", role)
+
+    def test_calloc(self):
+        src = "void *f(int n) { return calloc(n, 4); }"
+        self.assertIn("ALLOCATES", context_builder._classify_function_role(src))
+
+    def test_strdup(self):
+        src = 'char *f(const char *s) { return strdup(s); }'
+        self.assertIn("ALLOCATES", context_builder._classify_function_role(src))
+
+
 class TestCrossFunctionPass(unittest.TestCase):
 
     def _make_functions(self, call_graph, filename='test.c'):
@@ -249,6 +289,28 @@ class TestCrossFunctionPass(unittest.TestCase):
 
 
 class TestLLMClient(unittest.TestCase):
+
+    def setUp(self):
+        self._orig_max = llm_client.MAX_RETRIES
+        self._orig_delay = llm_client.RETRY_DELAY_SECS
+        llm_client.MAX_RETRIES = 0      # disable retries so existing tests run once
+        llm_client.RETRY_DELAY_SECS = 0
+
+    def tearDown(self):
+        llm_client.MAX_RETRIES = self._orig_max
+        llm_client.RETRY_DELAY_SECS = self._orig_delay
+
+    def test_is_error_response_timeout(self):
+        self.assertTrue(llm_client.is_error_response("Error: Request timed out after 300 seconds."))
+
+    def test_is_error_response_api_error(self):
+        self.assertTrue(llm_client.is_error_response("API Error 500: Internal Server Error"))
+
+    def test_is_error_response_valid_json(self):
+        self.assertFalse(llm_client.is_error_response('{"vulnerabilities": []}'))
+
+    def test_is_error_response_non_string(self):
+        self.assertFalse(llm_client.is_error_response(None))
 
     @patch('builtins.open', mock_open())
     @patch('llm_client.requests.post')
@@ -368,6 +430,121 @@ class TestLLMClient(unittest.TestCase):
         result = llm_client._parse_llm_json("not valid json")
         self.assertIn("raw", result)
         self.assertEqual(result["raw"], "not valid json")
+
+
+class TestErrorHandling(unittest.TestCase):
+    """Integration tests for is_error_response guards in main()."""
+
+    def _run_main(self, functions, review_side_effect):
+        report_holder = {}
+
+        def capture_dump(data, f, **kwargs):
+            report_holder.update(data)
+
+        with patch('sys.argv', ['prog', 'test.c']), \
+             patch('ai_code_reviewer.HAS_PYCPARSER', True), \
+             patch('ai_code_reviewer.read_code_file', return_value=''), \
+             patch('ai_code_reviewer.analyze_ast', return_value=functions), \
+             patch('ai_code_reviewer._build_file_map', return_value=[]), \
+             patch('ai_code_reviewer._extract_file_sections', return_value={}), \
+             patch('ai_code_reviewer.review_code', side_effect=review_side_effect), \
+             patch('ai_code_reviewer._run_verification_pass'), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump', side_effect=capture_dump):
+            ai_code_reviewer.main()
+
+        return report_holder
+
+    def test_main_skips_errored_function(self):
+        funcs = {
+            'foo': {'calls': [], 'source': 'void foo() {}', 'file': 'test.c'},
+            'bar': {'calls': [], 'source': 'void bar() {}', 'file': 'test.c'},
+        }
+        responses = [
+            "Error: Request to Ollama timed out after 300 seconds.",
+            '{"function": "bar", "vulnerabilities": []}',
+        ]
+        report = self._run_main(funcs, responses)
+        entries = report.get('functions', [])
+        foo_entries = [e for e in entries if e.get('function') == 'foo']
+        bar_entries = [e for e in entries if e.get('function') == 'bar']
+        self.assertEqual(len(foo_entries), 1)
+        self.assertIn('error', foo_entries[0])
+        self.assertEqual(len(bar_entries), 1)
+        self.assertNotIn('error', bar_entries[0])
+
+
+class TestRetryLogic(unittest.TestCase):
+
+    def setUp(self):
+        self._orig_max = llm_client.MAX_RETRIES
+        self._orig_delay = llm_client.RETRY_DELAY_SECS
+        llm_client.MAX_RETRIES = 1
+        llm_client.RETRY_DELAY_SECS = 0
+
+    def tearDown(self):
+        llm_client.MAX_RETRIES = self._orig_max
+        llm_client.RETRY_DELAY_SECS = self._orig_delay
+
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_retries_on_timeout(self, mock_post):
+        success = MagicMock()
+        success.status_code = 200
+        success.json.return_value = {"message": {"content": "found issue"}}
+        mock_post.side_effect = [requests.exceptions.Timeout, success]
+
+        result = llm_client.review_code("system", "user")
+        self.assertEqual(result, "found issue")
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_retries_on_500(self, mock_post):
+        fail = MagicMock()
+        fail.status_code = 500
+        fail.text = "Internal Server Error"
+        success = MagicMock()
+        success.status_code = 200
+        success.json.return_value = {"message": {"content": "ok"}}
+        mock_post.side_effect = [fail, success]
+
+        result = llm_client.review_code("system", "user")
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_no_retry_on_400(self, mock_post):
+        fail = MagicMock()
+        fail.status_code = 400
+        fail.text = "Bad Request"
+        mock_post.return_value = fail
+
+        result = llm_client.review_code("system", "user")
+        self.assertIn("API Error 400", result)
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_review_code_no_retry_on_success(self, mock_post):
+        success = MagicMock()
+        success.status_code = 200
+        success.json.return_value = {"message": {"content": "great"}}
+        mock_post.return_value = success
+
+        result = llm_client.review_code("system", "user")
+        self.assertEqual(result, "great")
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch('builtins.open', mock_open())
+    @patch('llm_client.requests.post')
+    def test_max_retries_exhausted(self, mock_post):
+        mock_post.side_effect = requests.exceptions.Timeout
+
+        result = llm_client.review_code("system", "user")
+        self.assertIn("timed out", result)
+        self.assertEqual(mock_post.call_count, 2)  # initial + 1 retry
 
 
 class TestDeduplicateReport(unittest.TestCase):

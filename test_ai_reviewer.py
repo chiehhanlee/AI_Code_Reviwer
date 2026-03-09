@@ -145,6 +145,22 @@ class TestContextBuilder(unittest.TestCase):
         self.assertIn('void foo() { bar(); }', prompt)
         self.assertIn('void bar() {}', prompt)
 
+    def test_cross_function_user_prompt_includes_call_graph(self):
+        cluster_sources = {
+            'foo': 'void *foo() { return malloc(4); }',
+            'bar': 'void bar(void *p) { free(p); }',
+        }
+        call_edges = {'foo': ['bar'], 'bar': []}
+        prompt = context_builder._build_cross_function_user_prompt(
+            cluster_sources, call_edges=call_edges)
+        self.assertIn("Call Graph", prompt)
+        self.assertIn("`foo` calls: `bar`", prompt)
+
+    def test_cross_function_user_prompt_no_call_graph_when_none(self):
+        cluster_sources = {'foo': 'void foo() {}', 'bar': 'void bar() {}'}
+        prompt = context_builder._build_cross_function_user_prompt(cluster_sources)
+        self.assertNotIn("Call Graph", prompt)
+
 
 class TestClassifyFunctionRole(unittest.TestCase):
 
@@ -793,6 +809,83 @@ class TestGoldenSamples(unittest.TestCase):
         missing, extra = self.compare_report_to_golden(report, golden)
         self.assertEqual(missing, [])
         self.assertEqual(extra, [])
+
+
+class TestVerificationPass(unittest.TestCase):
+
+    def _make_report(self, vulns):
+        return {"functions": [{"function": "foo", "vulnerabilities": vulns}]}
+
+    def _make_functions(self, source="void foo() {}"):
+        return {"foo": {"source": source}}
+
+    @patch('ai_code_reviewer.verify_findings')
+    def test_confirmed_finding(self, mock_vf):
+        mock_vf.return_value = json.dumps({"verified": [
+            {"line": 10, "CWE_ID": "CWE-121",
+             "confirmed": True, "severity": "high",
+             "exploit_example": "buf[20] = 'x';"}
+        ]})
+        report = self._make_report([{"line": 10, "CWE_ID": "CWE-121", "description": "overflow"}])
+        ai_code_reviewer._run_verification_pass(report, self._make_functions())
+        v = report["functions"][0]["vulnerabilities"][0]
+        self.assertTrue(v["confirmed"])
+        self.assertEqual(v["severity"], "high")
+        self.assertEqual(v["exploit_example"], "buf[20] = 'x';")
+
+    @patch('ai_code_reviewer.verify_findings')
+    def test_rejected_finding(self, mock_vf):
+        mock_vf.return_value = json.dumps({"verified": [
+            {"line": 5, "CWE_ID": "CWE-134",
+             "confirmed": False, "severity": "", "exploit_example": ""}
+        ]})
+        report = self._make_report([{"line": 5, "CWE_ID": "CWE-134", "description": "fmt"}])
+        ai_code_reviewer._run_verification_pass(report, self._make_functions())
+        v = report["functions"][0]["vulnerabilities"][0]
+        self.assertFalse(v["confirmed"])
+
+    @patch('ai_code_reviewer.verify_findings')
+    def test_unverified_when_verifier_skips(self, mock_vf):
+        mock_vf.return_value = json.dumps({"verified": []})
+        report = self._make_report([{"line": 3, "CWE_ID": "CWE-476", "description": "null"}])
+        ai_code_reviewer._run_verification_pass(report, self._make_functions())
+        v = report["functions"][0]["vulnerabilities"][0]
+        self.assertIsNone(v["confirmed"])
+
+    @patch('ai_code_reviewer.verify_findings')
+    def test_none_response_handled(self, mock_vf):
+        mock_vf.return_value = None
+        report = self._make_report([{"line": 1, "CWE_ID": "CWE-121", "description": "x"}])
+        # Should not crash
+        ai_code_reviewer._run_verification_pass(report, self._make_functions())
+
+    @patch('ai_code_reviewer.verify_findings')
+    def test_entry_with_no_vulnerabilities_skipped(self, mock_vf):
+        report = {"functions": [{"function": "foo", "vulnerabilities": []}]}
+        ai_code_reviewer._run_verification_pass(report, self._make_functions())
+        mock_vf.assert_not_called()
+
+    def test_fuzzy_exact_match(self):
+        vm = {(10, "CWE-121"): {"confirmed": True, "severity": "high", "exploit_example": ""}}
+        self.assertIsNotNone(ai_code_reviewer._fuzzy_lookup(vm, 10, "CWE-121"))
+
+    def test_fuzzy_off_by_one(self):
+        vm = {(10, "CWE-121"): {"confirmed": True, "severity": "high", "exploit_example": ""}}
+        self.assertIsNotNone(ai_code_reviewer._fuzzy_lookup(vm, 11, "CWE-121"))
+
+    def test_fuzzy_off_by_three(self):
+        vm = {(10, "CWE-121"): {"confirmed": True, "severity": "high", "exploit_example": ""}}
+        self.assertIsNotNone(ai_code_reviewer._fuzzy_lookup(vm, 13, "CWE-121"))
+
+    def test_fuzzy_off_by_four_fails(self):
+        vm = {(10, "CWE-121"): {"confirmed": True, "severity": "high", "exploit_example": ""}}
+        self.assertIsNone(ai_code_reviewer._fuzzy_lookup(vm, 14, "CWE-121"))
+
+    def test_fuzzy_prefers_exact(self):
+        near = {"confirmed": False, "severity": "", "exploit_example": ""}
+        exact = {"confirmed": True, "severity": "high", "exploit_example": ""}
+        vm = {(10, "CWE-121"): exact, (11, "CWE-121"): near}
+        self.assertIs(ai_code_reviewer._fuzzy_lookup(vm, 10, "CWE-121"), exact)
 
 
 if __name__ == '__main__':

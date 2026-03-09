@@ -677,10 +677,11 @@ def _classify_function_role(source):
     return "USES or ORCHESTRATES (no direct alloc/free)"
 
 
-def _build_cross_function_user_prompt(cluster_sources):
+def _build_cross_function_user_prompt(cluster_sources, call_edges=None):
     """
     cluster_sources: dict[str, str] — {func_name: source_text} for each
     function in the cluster (source_text from extract_function_source).
+    call_edges: optional dict[str, list[str]] — intra-cluster call graph.
     """
     parts = [
         "## Functions Under Analysis\n",
@@ -690,6 +691,12 @@ def _build_cross_function_user_prompt(cluster_sources):
     ]
     for fname, source in cluster_sources.items():
         parts.append(f"- `{fname}`: {_classify_function_role(source)}")
+
+    if call_edges:
+        parts.append("\n## Call Graph (within this cluster)")
+        for fname, callees in sorted(call_edges.items()):
+            if callees:
+                parts.append(f"- `{fname}` calls: {', '.join(f'`{c}`' for c in sorted(callees))}")
 
     for fname, source in cluster_sources.items():
         parts.append(f"\n### Function: `{fname}`\n```c\n{source}\n```")

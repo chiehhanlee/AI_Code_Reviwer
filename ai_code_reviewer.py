@@ -19,6 +19,20 @@ from llm_client import ACTIVE_BACKEND, MODEL_NAME, VERIFY_BACKEND, VERIFY_MODEL_
     review_code, verify_findings, _parse_llm_json, is_error_response
 
 
+def _fuzzy_lookup(verify_map, line, cwe_id, tolerance=3):
+    """Look up (line, CWE_ID) in verify_map with ±tolerance line-number fuzz.
+    Returns exact match first; falls back to nearest within tolerance; else None."""
+    exact = verify_map.get((line, cwe_id))
+    if exact is not None:
+        return exact
+    for delta in range(1, tolerance + 1):
+        for candidate_line in (line + delta, line - delta):
+            hit = verify_map.get((candidate_line, cwe_id))
+            if hit is not None:
+                return hit
+    return None
+
+
 def _run_verification_pass(report, functions):
     """Use the verifier LLM to confirm each finding and add exploit_example,
     confirmed, and severity fields in-place.
@@ -50,10 +64,9 @@ def _run_verification_pass(report, functions):
             for v in _parse_llm_json(raw).get("verified", [])
         }
         for vuln in vulns:
-            key = (vuln.get("line"), vuln.get("CWE_ID"))
-            result = verify_map.get(key)
+            result = _fuzzy_lookup(verify_map, vuln.get("line"), vuln.get("CWE_ID"))
             if result is None:
-                print(f"    [WARN] verifier skipped {key[1]} at line {key[0]}", file=sys.stderr)
+                print(f"    [WARN] verifier skipped {vuln.get('CWE_ID')} at line {vuln.get('line')}", file=sys.stderr)
                 vuln["confirmed"]       = None
                 vuln["severity"]        = ""
                 vuln["exploit_example"] = ""
@@ -87,10 +100,9 @@ def _run_verification_pass(report, functions):
                 for v in _parse_llm_json(raw).get("verified", [])
             }
             for vuln in cf_findings:
-                key = (vuln.get("line"), vuln.get("CWE_ID"))
-                result = verify_map.get(key)
+                result = _fuzzy_lookup(verify_map, vuln.get("line"), vuln.get("CWE_ID"))
                 if result is None:
-                    print(f"    [WARN] verifier skipped {key[1]} at line {key[0]}", file=sys.stderr)
+                    print(f"    [WARN] verifier skipped {vuln.get('CWE_ID')} at line {vuln.get('line')}", file=sys.stderr)
                     vuln["confirmed"]       = None
                     vuln["severity"]        = ""
                     vuln["exploit_example"] = ""
@@ -285,7 +297,11 @@ def main():
                         f"Analyzing: {', '.join(cluster_names)}",
                         file=sys.stderr,
                     )
-                    user_prompt_cf = _build_cross_function_user_prompt(cluster_sources)
+                    call_edges = {
+                        n: [c for c in functions[n].get('calls', []) if c in cluster]
+                        for n in cluster_names
+                    }
+                    user_prompt_cf = _build_cross_function_user_prompt(cluster_sources, call_edges=call_edges)
                     raw_cf = review_code(
                         system_prompt_cf, user_prompt_cf,
                         func_name=f"__cross_function_cluster_{cluster_idx}",

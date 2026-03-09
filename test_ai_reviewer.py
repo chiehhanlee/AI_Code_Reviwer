@@ -30,6 +30,14 @@ class TestContextBuilder(unittest.TestCase):
         self.assertNotIn("this is a comment", result)
         self.assertIn("int x = 1;", result)
 
+    def test_prune_context_removes_multiline_comments(self):
+        code = "int x; /* this is\n   a comment */ int y;\n"
+        result = context_builder.prune_context(code)
+        self.assertNotIn("/*", result)
+        self.assertNotIn("this is", result)
+        self.assertIn("int x;", result)
+        self.assertIn("int y;", result)
+
     def test_build_system_prompt_full_file(self):
         prompt = context_builder._build_system_prompt()
         self.assertIn("security vulnerabilities", prompt)
@@ -886,6 +894,19 @@ class TestVerificationPass(unittest.TestCase):
         exact = {"confirmed": True, "severity": "high", "exploit_example": ""}
         vm = {(10, "CWE-121"): exact, (11, "CWE-121"): near}
         self.assertIs(ai_code_reviewer._fuzzy_lookup(vm, 10, "CWE-121"), exact)
+
+
+class TestCLIArgs(unittest.TestCase):
+
+    def test_cluster_size_rejects_zero(self):
+        parser = ai_code_reviewer._build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['dummy.c', '--cluster-size', '0'])
+
+    def test_cluster_size_rejects_negative(self):
+        parser = ai_code_reviewer._build_arg_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(['dummy.c', '--cluster-size', '-1'])
 
 
 if __name__ == '__main__':

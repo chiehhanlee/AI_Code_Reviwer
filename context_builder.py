@@ -469,7 +469,7 @@ def prune_context(code_content):
     # Remove single-line comments // ...
     code_content = re.sub(r'//.*', '', code_content)
     # Remove multi-line comments /* ... */
-    code_content = re.sub(r'/\\*.*?\\*/', '', code_content, flags=re.DOTALL)
+    code_content = re.sub(r'/\*.*?\*/', '', code_content, flags=re.DOTALL)
     return code_content
 
 

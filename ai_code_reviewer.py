@@ -177,7 +177,15 @@ def _deduplicate_report(report):
         print(f"Deduplication removed {removed} duplicate finding(s).", file=sys.stderr)
 
 
-def main():
+def _positive_int(value):
+    ivalue = int(value)
+    if ivalue < 1:
+        import argparse
+        raise argparse.ArgumentTypeError(f"cluster-size must be >= 1, got {value}")
+    return ivalue
+
+
+def _build_arg_parser():
     import argparse
     parser = argparse.ArgumentParser(description="AI C/C++ security reviewer")
     parser.add_argument("filepath", help="C source file to analyze")
@@ -186,10 +194,15 @@ def main():
                         help="Additional include search path (repeatable, like gcc -I)")
     parser.add_argument("-o", "--output", dest="output", default=None, metavar="FILE",
                         help="Output JSON file (default: <source>.audit.json)")
-    parser.add_argument("--cluster-size", type=int, default=8, metavar="N",
+    parser.add_argument("--cluster-size", type=_positive_int, default=8, metavar="N",
                         help="Max functions per cross-function cluster (default: 8)")
     parser.add_argument("--timeout", type=int, default=None, metavar="N",
                         help="API timeout in seconds (default: API_TIMEOUT_SECS env or 300)")
+    return parser
+
+
+def main():
+    parser = _build_arg_parser()
     args = parser.parse_args()
 
     import llm_client

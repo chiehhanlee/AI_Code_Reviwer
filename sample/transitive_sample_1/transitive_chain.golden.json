@@ -1,0 +1,37 @@
+{
+  "file": "sample/transitive_sample_1/transitive_chain.c",
+  "model": "golden",
+  "mode": "function-by-function",
+  "functions": [
+    {
+      "function": "unsafe_copy",
+      "file": "transitive_chain.c",
+      "vulnerabilities": [
+        {
+          "line": 21,
+          "CWE_ID": "CWE-676",
+          "description": "strcpy copies src into dst without any length check; the caller is entirely responsible for ensuring dst is large enough, making this function inherently unsafe to use."
+        }
+      ]
+    },
+    {
+      "function": "process_input",
+      "file": "transitive_chain.c",
+      "vulnerabilities": []
+    },
+    {
+      "function": "handle_request",
+      "file": "transitive_chain.c",
+      "vulnerabilities": []
+    }
+  ],
+  "cross_function": [
+    {
+      "functions_involved": ["handle_request", "process_input", "unsafe_copy"],
+      "file": "transitive_chain.c",
+      "line": 21,
+      "CWE_ID": "CWE-121",
+      "description": "handle_request reads up to 255 bytes from a file descriptor and passes the full string to process_input, which has only a 64-byte local_buf; unsafe_copy performs strcpy without bounds checking, so any input longer than 63 bytes overflows the stack buffer."
+    }
+  ]
+}

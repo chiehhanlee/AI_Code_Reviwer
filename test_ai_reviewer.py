@@ -129,6 +129,30 @@ class TestContextBuilder(unittest.TestCase):
         self.assertIn(frozenset({'a', 'b'}), cluster_sets)
         self.assertIn(frozenset({'c', 'd'}), cluster_sets)
 
+    def test_build_call_clusters_transitive_depth_two(self):
+        # A (target) -> B -> C: with depth=2 all three should be in one cluster.
+        funcs = {
+            'A': {'calls': ['B'], 'source': '', 'file': 'test.c'},
+            'B': {'calls': ['C'], 'source': '', 'file': 'test.c'},
+            'C': {'calls': [], 'source': '', 'file': 'test.c'},
+        }
+        target = {'A': funcs['A']}
+        result = context_builder.build_call_clusters(funcs, target, max_callee_depth=2)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], {'A', 'B', 'C'})
+
+    def test_build_call_clusters_depth_one_excludes_transitive(self):
+        # With depth=1, only direct callees of the target are seeded; C is invisible.
+        funcs = {
+            'A': {'calls': ['B'], 'source': '', 'file': 'test.c'},
+            'B': {'calls': ['C'], 'source': '', 'file': 'test.c'},
+            'C': {'calls': [], 'source': '', 'file': 'test.c'},
+        }
+        target = {'A': funcs['A']}
+        result = context_builder.build_call_clusters(funcs, target, max_callee_depth=1)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0], {'A', 'B'})
+
     # --- cross-function prompt tests ---
 
     def test_cross_function_system_prompt_contains_cwes(self):
@@ -637,6 +661,7 @@ class TestGoldenSamples(unittest.TestCase):
         "sample/medium_sample_1/network_parser.golden.json",
         "sample/medium_sample_2/session_mgr.golden.json",
         "sample/medium_sample_3/config_reader.golden.json",
+        "sample/transitive_sample_1/transitive_chain.golden.json",
     ]
 
     SAMPLE_FUNCTIONS = {
@@ -651,6 +676,9 @@ class TestGoldenSamples(unittest.TestCase):
         "sample/medium_sample_3/config_reader.c": {
             "log_error", "read_line", "parse_config_line",
             "read_config", "apply_config",
+        },
+        "sample/transitive_sample_1/transitive_chain.c": {
+            "unsafe_copy", "process_input", "handle_request",
         },
     }
 
@@ -715,6 +743,26 @@ class TestGoldenSamples(unittest.TestCase):
                 funcs = context_builder.analyze_ast(code, path)
                 self.assertEqual(set(funcs.keys()), expected_funcs,
                                  f"AST function mismatch for {path}")
+
+    def test_transitive_sample_cluster_includes_all_three(self):
+        """AST + build_call_clusters with depth=2 must produce one cluster of 3."""
+        try:
+            import pycparser  # noqa: F401
+        except ImportError:
+            self.skipTest("pycparser not installed")
+
+        path = "sample/transitive_sample_1/transitive_chain.c"
+        code = context_builder.read_code_file(path)
+        functions = context_builder.analyze_ast(code, path)
+        # All three functions must be extracted
+        self.assertEqual(set(functions.keys()),
+                         {"unsafe_copy", "process_input", "handle_request"})
+        # handle_request is the top-level; treat it as the target function
+        target = {"handle_request": functions["handle_request"]}
+        clusters = context_builder.build_call_clusters(
+            functions, target, max_callee_depth=2)
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0], {"handle_request", "process_input", "unsafe_copy"})
 
     # ------------------------------------------------------------------
     # Comparison utility — used for integration testing against golden

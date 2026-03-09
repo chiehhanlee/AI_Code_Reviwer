@@ -577,7 +577,8 @@ def _build_user_prompt(code_content, func_name=None, context_code=""):
         )
 
 
-def build_call_clusters(functions, target_funcs, max_cluster_size=8):
+def build_call_clusters(functions, target_funcs, max_cluster_size=8,
+                        max_callee_depth=2):
     """
     Return weakly-connected components of the call graph seeded by target_funcs.
     Callee functions defined anywhere in `functions` (including included files)
@@ -586,13 +587,26 @@ def build_call_clusters(functions, target_funcs, max_cluster_size=8):
     Singletons are excluded.
     Clusters larger than max_cluster_size are replaced by per-node
     ego-neighborhoods (node + its direct call neighbors in the cluster).
+
+    max_callee_depth controls how many hops of transitive callees are included.
+    Depth 1 = direct callees only (legacy behaviour).
+    Depth 2 (default) = direct callees + their callees, enabling detection of
+    vulnerabilities that only appear across three or more functions.
     """
-    # Seed with target functions; pull in any callee that exists in the codebase.
+    # BFS seed: expand from target_funcs up to max_callee_depth hops.
     nodes = set(target_funcs.keys())
-    for fname in target_funcs:
-        for callee in target_funcs[fname]['calls']:
-            if callee in functions:
-                nodes.add(callee)
+    frontier = set(target_funcs.keys())
+    for _depth in range(max_callee_depth):
+        next_frontier = set()
+        for fname in frontier:
+            data = target_funcs.get(fname) or functions.get(fname, {})
+            for callee in data.get('calls', []):
+                if callee in functions and callee not in nodes:
+                    nodes.add(callee)
+                    next_frontier.add(callee)
+        if not next_frontier:
+            break
+        frontier = next_frontier
 
     parent = {n: n for n in nodes}
 

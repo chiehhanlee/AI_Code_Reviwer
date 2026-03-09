@@ -196,6 +196,8 @@ def _build_arg_parser():
                         help="Output JSON file (default: <source>.audit.json)")
     parser.add_argument("--cluster-size", type=_positive_int, default=8, metavar="N",
                         help="Max functions per cross-function cluster (default: 8)")
+    parser.add_argument("--callee-depth", type=_positive_int, default=2, metavar="N",
+                        help="Transitive callee depth for cluster seeding (default: 2)")
     parser.add_argument("--timeout", type=int, default=None, metavar="N",
                         help="API timeout in seconds (default: API_TIMEOUT_SECS env or 300)")
     return parser
@@ -277,7 +279,8 @@ def main():
             print(f"Running cross-function analysis pass... "
                   f"(backend: {ACTIVE_BACKEND}, model: {MODEL_NAME})", file=sys.stderr)
             clusters = build_call_clusters(functions, target_funcs,
-                                           max_cluster_size=args.cluster_size)
+                                           max_cluster_size=args.cluster_size,
+                                           max_callee_depth=args.callee_depth)
             if clusters:
                 cross_function_results = []
                 system_prompt_cf = _build_cross_function_system_prompt()

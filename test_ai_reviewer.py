@@ -157,7 +157,7 @@ class TestContextBuilder(unittest.TestCase):
 
     def test_cross_function_system_prompt_contains_cwes(self):
         prompt = context_builder._build_cross_function_system_prompt()
-        for cwe in ['CWE-401', 'CWE-415', 'CWE-416', 'CWE-476']:
+        for cwe in ['CWE-121', 'CWE-401', 'CWE-415', 'CWE-416', 'CWE-476']:
             self.assertIn(cwe, prompt)
 
     def test_cross_function_system_prompt_schema_keys(self):
@@ -268,7 +268,6 @@ class TestCrossFunctionPass(unittest.TestCase):
         return report_holder
 
     def test_cross_function_key_populated(self):
-        # Functions need malloc/free in their source to pass the alloc/free filter
         funcs = {
             'foo': {'calls': ['bar'], 'source': 'void *foo() { return malloc(4); }', 'file': 'test.c'},
             'bar': {'calls': [], 'source': 'void bar(void *p) { free(p); }', 'file': 'test.c'},
@@ -314,7 +313,6 @@ class TestCrossFunctionPass(unittest.TestCase):
                 return '{"cross_function_vulnerabilities": []}'
             return f'{{"function": "{func_name}", "vulnerabilities": []}}'
 
-        # Give functions malloc/free source so they pass the alloc/free filter
         funcs = {
             'foo': {'calls': ['bar'], 'source': 'void *foo() { return malloc(4); }', 'file': 'test.c'},
             'bar': {'calls': [], 'source': 'void bar(void *p) { free(p); }', 'file': 'test.c'},

@@ -72,7 +72,7 @@ def _run_verification_pass(report, functions):
                 vuln["exploit_example"] = ""
                 total_unverified += 1
             else:
-                vuln["confirmed"]       = result.get("confirmed", True)
+                vuln["confirmed"]       = result.get("confirmed")
                 vuln["severity"]        = result.get("severity", "")
                 vuln["exploit_example"] = result.get("exploit_example", "")
                 if vuln["confirmed"]:
@@ -108,7 +108,7 @@ def _run_verification_pass(report, functions):
                     vuln["exploit_example"] = ""
                     total_unverified += 1
                 else:
-                    vuln["confirmed"]       = result.get("confirmed", True)
+                    vuln["confirmed"]       = result.get("confirmed")
                     vuln["severity"]        = result.get("severity", "")
                     vuln["exploit_example"] = result.get("exploit_example", "")
                     if vuln["confirmed"]:
@@ -287,26 +287,6 @@ def main():
                 for cluster_idx, cluster in enumerate(clusters, start=1):
                     cluster_names = sorted(cluster)
                     cluster_sources = {n: functions[n]['source'] for n in cluster_names}
-
-                    # Skip clusters with no unbalanced memory operations — every
-                    # cross-function CWE (401/415/416/476) requires at least one
-                    # function that allocates-without-freeing (escaping pointer) or
-                    # frees-without-allocating (external freer). A cluster whose only
-                    # memory-active function both allocates AND frees internally has
-                    # no cross-boundary concern and would cause LLM hallucinations.
-                    roles = [_classify_function_role(src) for src in cluster_sources.values()]
-                    has_unbalanced = any(
-                        r in ("ALLOCATES memory (returns pointer to caller)",
-                              "FREES memory (calls free() on its argument)")
-                        for r in roles
-                    )
-                    if not has_unbalanced:
-                        print(
-                            f"  [cluster {cluster_idx}/{len(clusters)}] "
-                            f"Skipping {', '.join(cluster_names)} — no unbalanced alloc/free",
-                            file=sys.stderr,
-                        )
-                        continue
 
                     print(
                         f"  [cluster {cluster_idx}/{len(clusters)}] "

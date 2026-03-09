@@ -170,10 +170,13 @@ Respond with a JSON object only — no prose, no markdown fences. Use exactly th
 List ALL vulnerabilities found, one object per issue. If none found, return an empty "vulnerabilities" array."""
 
 CROSS_FUNCTION_CWES = """\
-1. CWE-401: Memory Leak — memory allocated in one function never freed by any caller in this cluster.
-2. CWE-415: Double Free — the same pointer is freed more than once across functions.
-3. CWE-416: Use After Free — a pointer is freed in one function then dereferenced in another.
-4. CWE-476: NULL Pointer Dereference — a callee can return NULL and its caller \
+1. CWE-121/787: Stack/Heap Buffer Overflow — a caller passes a buffer too small for the \
+data a callee writes into it (e.g. via strcpy, memcpy, sprintf), detectable only by \
+tracing the size from the allocation site through the call chain.
+2. CWE-401: Memory Leak — memory allocated in one function never freed by any caller in this cluster.
+3. CWE-415: Double Free — the same pointer is freed more than once across functions.
+4. CWE-416: Use After Free — a pointer is freed in one function then dereferenced in another.
+5. CWE-476: NULL Pointer Dereference — a callee can return NULL and its caller \
 dereferences the result without a NULL check."""
 
 OUTPUT_FORMAT_CROSS_FUNCTION = """\
